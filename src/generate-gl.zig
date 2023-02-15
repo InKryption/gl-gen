@@ -1,9 +1,9 @@
+//! Usage `<executable> <path/to/output.zig> <path/to/gl.xml> [<extensions>...]`
+//!
 const std = @import("std");
 const assert = std.debug.assert;
 
-const build_options = @import("build_options");
-const TargetVersion = @import("target-version.zig").TargetVersion;
-const target_version: TargetVersion = build_options.target_version;
+const build_options = @import("build-options");
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
@@ -23,7 +23,6 @@ pub fn main() !void {
         gl_xml_file: std.fs.File,
         extensions: []const []const u8,
     };
-
     const args: Args = args: {
         var output_file: ?std.fs.File = null;
         var gl_xml_file: ?std.fs.File = null;
@@ -83,26 +82,57 @@ pub fn main() !void {
         args.gl_xml_file.close();
     }
 
-    var buffered_gl_xml = std.io.bufferedReaderSize(4096, args.gl_xml_file.reader());
-    const gl_xml = buffered_gl_xml.reader();
+    const data: OpenGlData = data: {
+        var buffered_gl_xml = std.io.bufferedReaderSize(4096, args.gl_xml_file.reader());
+        const gl_xml_reader = buffered_gl_xml.reader();
 
-    var error_line: u64 = undefined;
-    var error_column: u64 = undefined;
-    const tree = parseXml(
-        allocator,
-        gl_xml,
-        .{
+        var fallback_ally = FallbackBufferAllocator.init(&struct {
+            var static_buffer: [512]u8 = undefined;
+        }.static_buffer, allocator);
+
+        var error_line: u64 = undefined;
+        var error_column: u64 = undefined;
+        const tree = parseXml(fallback_ally.allocator(), gl_xml_reader, .{
             .line = &error_line,
             .column = &error_column,
-        },
-    ) catch |err| {
-        try stderr.print("Parsing error encountered at {d}:{d} (line:column) of the registry.\n", .{ error_line + 1, error_column + 1 });
-        return err;
-    };
-    defer tree.deinit(allocator);
+            .discard_comments = true,
+            .discard_whitespace = true,
+        }) catch |err|
+            {
+            try stderr.print("Parsing error encountered at {d}:{d} (line:column) of the registry.\n", .{ error_line + 1, error_column + 1 });
+            return err;
+        };
+        defer tree.deinit(fallback_ally.allocator());
 
-    try args.output_file.writer().print("{any}\n", .{XmlTree.FmtElement{ .root = tree.root }});
+        break :data .{
+            .comment = &.{},
+        };
+    };
+    _ = data;
+
+    var out_writer_buffered = std.io.bufferedWriter(args.output_file.writer());
+    defer assert(out_writer_buffered.end == 0); // remember to flush
+    const out = out_writer_buffered.writer();
+
+    try out.print(
+        \\//!
+        \\//! Generation parameters:
+        \\//! API: {s}
+        \\//! Profile: {s}
+        \\//! Extensions: {s}
+        \\//!
+    , .{
+        build_options.target_version.stringWithGlPrefix(),
+        @tagName(build_options.target_profile),
+        fmtList([]const u8, args.extensions, .{}),
+    });
+
+    try out_writer_buffered.flush();
 }
+
+const OpenGlData = struct {
+    comment: []const u8,
+};
 
 const XmlTree = struct {
     arena_state: std.heap.ArenaAllocator.State,
@@ -123,61 +153,52 @@ const XmlTree = struct {
             text: []const u8,
             comment: []const u8,
         };
-    };
 
-    pub fn deinit(tree: XmlTree, allocator: std.mem.Allocator) void {
-        tree.arena_state.promote(allocator).deinit();
-    }
-
-    pub const FmtElement = struct {
-        root: Element,
-        indent: u32 = 0,
-
-        pub fn format(
-            tree: FmtElement,
-            comptime fmt_str: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = options;
-            _ = fmt_str;
-            try writer.writeByteNTimes(' ', tree.indent * 2);
-            try writer.writeAll(tree.root.name);
-            if (tree.root.attributes.len != 0)
-                try writer.writeAll(": ");
-            for (tree.root.attributes) |attr, i| {
-                if (i != 0) try writer.writeAll(",");
-                try writer.print("{s}={2c}{s}{2c}", .{ attr.name, attr.value, attr.quote });
+        fn getAttributeValue(elem: Element, name: []const u8) ?[]const u8 {
+            for (elem.attributes) |attr| {
+                if (!std.mem.eql(u8, attr.name, name)) continue;
+                return attr.value;
             }
-            try writer.writeAll("\n");
-            for (tree.root.children) |child| {
-                try writer.writeByteNTimes(' ', tree.indent * 4);
-                switch (child) {
-                    .element => |elem| try writer.print("{}", .{FmtElement{ .root = elem, .indent = tree.indent + 1 }}),
-                    .text => |text| try writer.print("\"{s}\"", .{text}),
-                    .comment => |comment| try writer.print("<!--{s}-->", .{comment}),
-                }
-                try writer.writeAll("\n");
-            } else if (tree.root.children.len == 0) {
-                try writer.writeAll("\n");
+            return null;
+        }
+
+        fn getChildElement(elem: Element, name: []const u8) ?Element {
+            for (elem.children) |child| {
+                const child_elem: Element = switch (child) {
+                    .element => |child_elem| child_elem,
+                    .text => continue,
+                    .comment => continue,
+                };
+                if (!std.mem.eql(u8, child_elem.name, name)) continue;
+                return child_elem;
             }
+            return null;
         }
     };
+
+    fn deinit(tree: XmlTree, allocator: std.mem.Allocator) void {
+        tree.arena_state.promote(allocator).deinit();
+    }
 };
 fn parseXml(
     child_allocator: std.mem.Allocator,
     xml_reader: anytype,
-    ctx: struct {
+    args: struct {
         /// Only written to on error. Indicates the line on which the error occured (0 based index).
         line: *u64,
         /// Only written to on error. Indicates the column on which the error occured (0 based index).
         column: *u64,
+
+        /// Discard comments
+        discard_comments: bool = true,
+        /// Discard any text that is only comprised of whitespace
+        discard_whitespace: bool = true,
     },
 ) !XmlTree {
     var lct_reader = lineColumnTrackingReader(xml_reader);
     errdefer {
-        ctx.line.* = lct_reader.line;
-        ctx.column.* = lct_reader.col;
+        args.line.* = lct_reader.line;
+        args.column.* = lct_reader.col;
     }
 
     const reader = lct_reader.reader();
@@ -203,7 +224,7 @@ fn parseXml(
     defer attr_data_buf.deinit();
 
     var attributes_buf = try std.ArrayList(XmlTree.Element.Attribute).initCapacity(child_allocator, 8);
-    defer attr_data_buf.deinit();
+    defer attributes_buf.deinit();
 
     var content_buf = try std.ArrayList(u8).initCapacity(child_allocator, 128);
     defer content_buf.deinit();
@@ -253,8 +274,8 @@ fn parseXml(
                         .root = last_element_open,
                     };
                     const parent: *XmlTree.Element = &element_stack.items[element_stack.items.len - 1];
-                    parent.children = try allocator.realloc(removeConst(parent.children), parent.children.len + 1);
-                    removeConst(&parent.children[parent.children.len - 1]).* = .{
+                    parent.children = try allocator.realloc(@constCast(parent.children), parent.children.len + 1);
+                    @constCast(&parent.children[parent.children.len - 1]).* = .{
                         .element = last_element_open,
                     };
                     state = .content;
@@ -345,8 +366,8 @@ fn parseXml(
                                     };
 
                                     const parent: *XmlTree.Element = &element_stack.items[element_stack.items.len - 1];
-                                    parent.children = try allocator.realloc(removeConst(parent.children), parent.children.len + 1);
-                                    removeConst(&parent.children[parent.children.len - 1]).* = .{
+                                    parent.children = try allocator.realloc(@constCast(parent.children), parent.children.len + 1);
+                                    @constCast(&parent.children[parent.children.len - 1]).* = .{
                                         .element = new_elem,
                                     };
                                     state = .content;
@@ -376,14 +397,18 @@ fn parseXml(
                         while (true) {
                             const comment_cp = try ((try readCodepoint(reader)) orelse error.EndOfStream);
                             if (comment_cp != '-') {
-                                _ = try writeCodepoint(content_buf.writer(), comment_cp);
+                                if (!args.discard_comments) {
+                                    _ = try writeCodepoint(content_buf.writer(), comment_cp);
+                                }
                                 continue;
                             }
 
                             const comment_cp_2 = try ((try readCodepoint(reader)) orelse error.EndOfStream);
                             if (comment_cp_2 != '-') {
-                                _ = try writeCodepoint(content_buf.writer(), comment_cp);
-                                _ = try writeCodepoint(content_buf.writer(), comment_cp_2);
+                                if (!args.discard_comments) {
+                                    _ = try writeCodepoint(content_buf.writer(), comment_cp);
+                                    _ = try writeCodepoint(content_buf.writer(), comment_cp_2);
+                                }
                                 continue;
                             }
 
@@ -395,11 +420,13 @@ fn parseXml(
                             break;
                         } else unreachable;
 
-                        const parent: *XmlTree.Element = &element_stack.items[element_stack.items.len - 1];
-                        parent.children = try allocator.realloc(removeConst(parent.children), parent.children.len + 1);
-                        removeConst(&parent.children[parent.children.len - 1]).* = .{
-                            .comment = try allocator.dupe(u8, content_buf.items),
-                        };
+                        if (!args.discard_comments) {
+                            const parent: *XmlTree.Element = &element_stack.items[element_stack.items.len - 1];
+                            parent.children = try allocator.realloc(@constCast(parent.children), parent.children.len + 1);
+                            @constCast(&parent.children[parent.children.len - 1]).* = .{
+                                .comment = try allocator.dupe(u8, content_buf.items),
+                            };
+                        }
                         state = .content;
                         continue :mainloop;
                     },
@@ -412,16 +439,17 @@ fn parseXml(
             },
             .content => {
                 content_buf.shrinkRetainingCapacity(0);
-                var non_whitespace: bool = false; // TODO: use
+                var non_whitespace: bool = false;
 
                 var cdata_cp = iteration_cp;
                 while (true) : (cdata_cp = try ((try readCodepoint(reader)) orelse error.EndOfStream)) {
                     switch (cdata_cp) {
                         '<' => {
-                            if (content_buf.items.len != 0) {
+                            if (content_buf.items.len != 0) blk: {
+                                if (args.discard_whitespace and !non_whitespace) break :blk;
                                 const parent: *XmlTree.Element = &element_stack.items[element_stack.items.len - 1];
-                                parent.children = try allocator.realloc(removeConst(parent.children), parent.children.len + 1);
-                                removeConst(&parent.children[parent.children.len - 1]).* = .{
+                                parent.children = try allocator.realloc(@constCast(parent.children), parent.children.len + 1);
+                                @constCast(&parent.children[parent.children.len - 1]).* = .{
                                     .text = try allocator.dupe(u8, content_buf.items),
                                 };
                             }
@@ -466,48 +494,6 @@ fn makeElementWithSharedAllocBetweenNameAndAttributes(
         .name = name_slice,
         .attributes = attributes_slice,
         .children = &[_]XmlTree.Element.Child{},
-    };
-}
-
-inline fn lineColumnTrackingReader(reader: anytype) LineColumnTrackingReader(@TypeOf(reader)) {
-    return .{
-        .inner = reader,
-    };
-}
-fn LineColumnTrackingReader(comptime ReaderType: type) type {
-    return struct {
-        const Self = @This();
-        inner: Inner,
-        line: u64 = 0,
-        col: u64 = 0,
-        ignore_linefeed: bool = true,
-
-        pub const Inner = ReaderType;
-
-        pub const Reader = std.io.Reader(*Self, Inner.Error, Self.read);
-        pub fn reader(self: *Self) Reader {
-            return .{ .context = self };
-        }
-
-        fn read(self: *Self, buffer: []u8) Inner.Error!usize {
-            const bytes_read = try self.inner.read(buffer);
-            if (bytes_read == 0) return 0;
-
-            for (buffer[0..bytes_read]) |byte| {
-                switch (byte) {
-                    '\n' => {
-                        self.line += 1;
-                        self.col = 0;
-                    },
-                    else => {
-                        if (self.ignore_linefeed and byte == '\r') continue;
-                        self.col += 1;
-                    },
-                }
-            }
-
-            return bytes_read;
-        }
     };
 }
 
@@ -631,8 +617,152 @@ fn RemoveConst(comptime Ptr: type) type {
     new_info.is_const = false;
     return @Type(.{ .Pointer = new_info });
 }
-/// Remove const qualifier.
-/// NOTE: Use only where necessary.
-inline fn removeConst(ptr: anytype) RemoveConst(@TypeOf(ptr)) {
-    return @qualCast(RemoveConst(@TypeOf(ptr)), ptr);
+
+const FmtListWidth = union(enum) {
+    unbounded,
+    element_count: usize,
+};
+inline fn fmtList(
+    comptime T: type,
+    list: []align(1) const T,
+    init: struct {
+        width: FmtListWidth = .unbounded,
+    },
+) FmtList(T) {
+    return .{
+        .list = list,
+        .width = init.width,
+    };
 }
+
+fn FmtList(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        list: []align(1) const T,
+        width: FmtListWidth,
+
+        pub fn format(
+            formatter: Self,
+            comptime fmt_str: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) @TypeOf(writer).Error!void {
+            switch (formatter.width) {
+                .unbounded => {
+                    for (formatter.list) |value, i| {
+                        if (i != 0) try writer.writeAll(", ");
+                        try std.fmt.formatType(
+                            value,
+                            fmt_str,
+                            options,
+                            writer,
+                            std.fmt.default_max_depth,
+                        );
+                    }
+                },
+                .element_count => |max_width| {
+                    for (formatter.list) |value, i| {
+                        if (i != 0) try writer.writeAll(", ");
+                        if (i != 0 and i % max_width == 0) try writer.writeByte('\n');
+                        try std.fmt.formatType(
+                            value,
+                            fmt_str,
+                            options,
+                            writer,
+                            std.fmt.default_max_depth,
+                        );
+                    }
+                },
+            }
+        }
+    };
+}
+
+inline fn lineColumnTrackingReader(reader: anytype) LineColumnTrackingReader(@TypeOf(reader)) {
+    return .{
+        .inner = reader,
+    };
+}
+fn LineColumnTrackingReader(comptime ReaderType: type) type {
+    return struct {
+        const Self = @This();
+        inner: Inner,
+        line: u64 = 0,
+        col: u64 = 0,
+        ignore_linefeed: bool = true,
+
+        pub const Inner = ReaderType;
+
+        pub const Reader = std.io.Reader(*Self, Inner.Error, Self.read);
+        pub fn reader(self: *Self) Reader {
+            return .{ .context = self };
+        }
+
+        fn read(self: *Self, buffer: []u8) Inner.Error!usize {
+            const bytes_read = try self.inner.read(buffer);
+            if (bytes_read == 0) return 0;
+
+            for (buffer[0..bytes_read]) |byte| {
+                switch (byte) {
+                    '\n' => {
+                        self.line += 1;
+                        self.col = 0;
+                    },
+                    else => {
+                        if (self.ignore_linefeed and byte == '\r') continue;
+                        self.col += 1;
+                    },
+                }
+            }
+
+            return bytes_read;
+        }
+    };
+}
+
+const FallbackBufferAllocator = struct {
+    fba: std.heap.FixedBufferAllocator,
+    fallback_allocator: std.mem.Allocator,
+
+    pub fn init(buffer: []u8, fallback: std.mem.Allocator) FallbackBufferAllocator {
+        return .{
+            .fba = std.heap.FixedBufferAllocator.init(buffer),
+            .fallback_allocator = fallback,
+        };
+    }
+
+    pub inline fn allocator(self: *FallbackBufferAllocator) std.mem.Allocator {
+        return std.mem.Allocator{
+            .ptr = self,
+            .vtable = comptime &std.mem.Allocator.VTable{
+                .alloc = alloc,
+                .resize = resize,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+        const self = @ptrCast(*align(1) FallbackBufferAllocator, ptr);
+        return self.fba.allocator().rawAlloc(len, ptr_align, ret_addr) orelse
+            self.fallback_allocator.rawAlloc(len, ptr_align, ret_addr);
+    }
+
+    fn resize(ptr: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+        const self = @ptrCast(*align(1) FallbackBufferAllocator, ptr);
+        if (self.fba.ownsPtr(buf.ptr)) {
+            return self.fba.allocator().rawResize(buf, buf_align, new_len, ret_addr);
+        } else {
+            return self.fallback_allocator.rawResize(buf, buf_align, new_len, ret_addr);
+        }
+    }
+
+    fn free(ptr: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+        const self = @ptrCast(*align(1) FallbackBufferAllocator, ptr);
+        if (self.fba.ownsPtr(buf.ptr)) {
+            return self.fba.allocator().rawFree(buf, buf_align, ret_addr);
+        } else {
+            return self.fallback_allocator.rawFree(buf, buf_align, ret_addr);
+        }
+    }
+};

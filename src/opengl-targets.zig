@@ -1,4 +1,4 @@
-pub const TargetVersion = enum {
+pub const Version = enum {
     VERSION_1_0,
     VERSION_1_1,
     VERSION_1_2,
@@ -24,4 +24,15 @@ pub const TargetVersion = enum {
     ES_VERSION_3_1,
     ES_VERSION_3_2,
     SC_VERSION_2_0,
+
+    pub inline fn stringWithGlPrefix(version: Version) []const u8 {
+        return switch (version) {
+            inline else => |tag| "GL_" ++ @tagName(tag),
+        };
+    }
+};
+
+// TODO: Support other profiles
+pub const Profile = enum {
+    core,
 };
