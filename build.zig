@@ -1,5 +1,6 @@
 const std = @import("std");
 const Build = std.Build;
+const FileSource = Build.FileSource;
 const gl_targets = @import("src/opengl-targets.zig");
 
 pub fn build(b: *Build) void {
@@ -9,9 +10,9 @@ pub fn build(b: *Build) void {
     const xml_registry_file: ?[]const u8 = b.option([]const u8, "registry", "Path to the gl.xml registry file");
 
     const generator_build_options = b.createModule(.{
-        .dependencies = &[_]Build.ModuleDependency{
-            .{ .name = "opengl-targets", .module = b.createModule(.{ .source_file = .{ .path = "src/opengl-targets.zig" } }) },
-        },
+        .dependencies = &moduleDependencies(.{
+            .@"opengl-targets" = b.createModule(.{ .source_file = FileSource.relative("src/opengl-targets.zig") }),
+        }),
         .source_file = blk: {
             const basename = "build-options.zig";
             const write_build_options = b.addWriteFile(basename, b.fmt(
@@ -31,7 +32,7 @@ pub fn build(b: *Build) void {
     // exists as a `std.Bulid.FileSource` in the user's build script.
     const generator_exe = b.addExecutable(.{
         .name = "generator-exe",
-        .root_source_file = .{ .path = "src/generate-gl.zig" },
+        .root_source_file = FileSource.relative("src/generate-gl.zig"),
         .optimize = .Debug,
     });
     generator_exe.install();
@@ -49,19 +50,28 @@ pub fn build(b: *Build) void {
     b.addModule(.{
         .name = "opengl-bindings",
         .source_file = bindings_src,
+        .dependencies = &moduleDependencies(.{
+            .preamble = b.createModule(.{ .source_file = FileSource.relative("src/preamble.zig") }),
+        }),
     });
 
-    // Since we can't pass `std.Build.FileSource`s through `std.Build.dependency`,
+    // Since we can't pass `std.FileSource`s through `std.Build.dependency`,
     // the user has to use the generator executable directly in order to supply
     // the xml registry as a file source argument. But if they want to use the
     // module, we issue an error if they didn't supply the xml registry file path.
     if (xml_registry_file == null) {
-        generate_bindings.step.dependOn(&errorLogStep(b, error.MissingOpenGlXmlRegistry,
+        const error_step = errorLogStep(b, error.MissingOpenGlXmlRegistry,
             \\In order to use the 'opengl-bindings' module,
             \\please specify `registry` when calling `std.Build.dependency`.
             \\
-        , .{}).step);
+        , .{});
+        generate_bindings.step.dependOn(&error_step.step);
     }
+
+    // local testing & misc
+
+    const run_step = b.step("run", "Run the generator");
+    run_step.dependOn(&generate_bindings.step);
 }
 
 fn errorLogStep(
@@ -103,4 +113,25 @@ fn ErrorLogStep(
             return self.err_code;
         }
     };
+}
+
+fn ModuleDependenciesArrayFromStruct(comptime Struct: type) type {
+    const info = @typeInfo(Struct).Struct;
+    return [info.fields.len]Build.ModuleDependency;
+}
+inline fn moduleDependencies(
+    dependency_struct: anytype,
+) ModuleDependenciesArrayFromStruct(@TypeOf(dependency_struct)) {
+    const DepStruct = @TypeOf(dependency_struct);
+    const info = @typeInfo(DepStruct).Struct;
+    std.debug.assert(!info.is_tuple);
+
+    var result: [info.fields.len]Build.ModuleDependency = undefined;
+    inline for (info.fields) |field, i| {
+        result[i] = .{
+            .name = field.name,
+            .module = @field(dependency_struct, field.name),
+        };
+    }
+    return result;
 }

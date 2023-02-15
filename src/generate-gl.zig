@@ -119,13 +119,25 @@ pub fn main() !void {
         \\//! Generation parameters:
         \\//! API: {s}
         \\//! Profile: {s}
-        \\//! Extensions: {s}
-        \\//!
+        \\//! Extensions: 
     , .{
         build_options.target_version.stringWithGlPrefix(),
         @tagName(build_options.target_profile),
-        fmtList([]const u8, args.extensions, .{}),
     });
+
+    if (args.extensions.len == 0) {
+        try out.writeAll("(none)\n");
+    } else for (args.extensions) |ext, i| {
+        if (i != 0) try out.writeAll(", ");
+        try out.print("\"{s}\"", .{ext});
+    }
+
+    try out.writeAll(
+        \\//!
+        \\const preamble = @import("preamble");
+        \\
+        \\
+    );
 
     try out_writer_buffered.flush();
 }
@@ -616,66 +628,6 @@ fn RemoveConst(comptime Ptr: type) type {
     var new_info = @typeInfo(Ptr).Pointer;
     new_info.is_const = false;
     return @Type(.{ .Pointer = new_info });
-}
-
-const FmtListWidth = union(enum) {
-    unbounded,
-    element_count: usize,
-};
-inline fn fmtList(
-    comptime T: type,
-    list: []align(1) const T,
-    init: struct {
-        width: FmtListWidth = .unbounded,
-    },
-) FmtList(T) {
-    return .{
-        .list = list,
-        .width = init.width,
-    };
-}
-
-fn FmtList(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        list: []align(1) const T,
-        width: FmtListWidth,
-
-        pub fn format(
-            formatter: Self,
-            comptime fmt_str: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) @TypeOf(writer).Error!void {
-            switch (formatter.width) {
-                .unbounded => {
-                    for (formatter.list) |value, i| {
-                        if (i != 0) try writer.writeAll(", ");
-                        try std.fmt.formatType(
-                            value,
-                            fmt_str,
-                            options,
-                            writer,
-                            std.fmt.default_max_depth,
-                        );
-                    }
-                },
-                .element_count => |max_width| {
-                    for (formatter.list) |value, i| {
-                        if (i != 0) try writer.writeAll(", ");
-                        if (i != 0 and i % max_width == 0) try writer.writeByte('\n');
-                        try std.fmt.formatType(
-                            value,
-                            fmt_str,
-                            options,
-                            writer,
-                            std.fmt.default_max_depth,
-                        );
-                    }
-                },
-            }
-        }
-    };
 }
 
 inline fn lineColumnTrackingReader(reader: anytype) LineColumnTrackingReader(@TypeOf(reader)) {
