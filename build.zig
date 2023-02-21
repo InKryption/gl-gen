@@ -1,13 +1,20 @@
 const std = @import("std");
 const Build = std.Build;
 const FileSource = Build.FileSource;
+const util = @import("src/util.zig");
 const gl_targets = @import("src/opengl-targets.zig");
 
 pub fn build(b: *Build) void {
-    const target_version: gl_targets.Version = b.option(gl_targets.Version, "version", "Version of OpenGL to target") orelse @panic("Must specify OpenGL target version.\n");
-    const target_profile: gl_targets.Profile = b.option(gl_targets.Profile, "profile", "OpenGL profile to target") orelse @panic("Must specify OpenGL target profile.\n");
-    const output_name: []const u8 = b.option([]const u8, "output-name", "Name of the file that the bindings will be written to [default: 'gl.zig']") orelse "gl.zig";
+    const target = b.standardTargetOptions(.{});
+    _ = target;
+    const optimize = b.standardOptimizeOption(.{});
+    _ = optimize;
+    const gl_version: gl_targets.Version = b.option(gl_targets.Version, "version", "Version of OpenGL to target") orelse @panic("Must specify OpenGL target version.\n");
+    const gl_profile: gl_targets.Profile = b.option(gl_targets.Profile, "profile", "OpenGL profile to target") orelse @panic("Must specify OpenGL target profile.\n");
     const xml_registry_file: ?[]const u8 = b.option([]const u8, "registry", "Path to the gl.xml registry file");
+    if (xml_registry_file != null and !std.fs.path.isAbsolute(xml_registry_file.?)) {
+        @panic("Must specify an absolute path to the gl.xml registry file");
+    }
 
     const generator_build_options = b.createModule(.{
         .dependencies = &moduleDependencies(.{
@@ -15,13 +22,25 @@ pub fn build(b: *Build) void {
         }),
         .source_file = blk: {
             const basename = "build-options.zig";
-            const write_build_options = b.addWriteFile(basename, b.fmt(
+
+            var contents = std.ArrayList(u8).init(b.allocator);
+            defer contents.deinit();
+
+            const writer = contents.writer();
+
+            writer.print(
+                \\const std = @import("std");
                 \\const gl_targets = @import("opengl-targets");
                 \\
-                \\pub const target_version: gl_targets.Version = .{s};
-                \\pub const target_profile: gl_targets.Profile = .{s};
+                \\pub const gl_version: gl_targets.Version = .{s};
+                \\pub const gl_profile: gl_targets.Profile = .{s};
                 \\
-            , .{ @tagName(target_version), @tagName(target_profile) }));
+            , .{
+                @tagName(gl_version),
+                @tagName(gl_profile),
+            }) catch unreachable;
+
+            const write_build_options = b.addWriteFile(basename, contents.items);
             break :blk write_build_options.getFileSource(basename).?;
         },
     });
@@ -33,16 +52,18 @@ pub fn build(b: *Build) void {
     const generator_exe = b.addExecutable(.{
         .name = "generator-exe",
         .root_source_file = FileSource.relative("src/generate-gl.zig"),
-        .optimize = .Debug,
     });
     generator_exe.install();
-    generator_exe.linkLibC();
+    generator_exe.linkLibC(); // TODO: stop using c allocator to avoid C dependency
     generator_exe.addModule("build-options", generator_build_options);
 
     const generate_bindings = b.addRunArtifact(generator_exe);
-    const bindings_src = generate_bindings.addOutputFileArg(output_name);
+    const bindings_src = generate_bindings.addOutputFileArg("gl.zig");
     if (xml_registry_file) |path| {
-        generate_bindings.addFileSourceArg(.{ .path = path });
+        generate_bindings.addArg(path);
+    }
+    if (b.args) |args| {
+        generate_bindings.addArgs(args);
     }
 
     // with this, the user can just obtain the opengl bindings as a module
@@ -50,9 +71,7 @@ pub fn build(b: *Build) void {
     b.addModule(.{
         .name = "opengl-bindings",
         .source_file = bindings_src,
-        .dependencies = &moduleDependencies(.{
-            .preamble = b.createModule(.{ .source_file = FileSource.relative("src/preamble.zig") }),
-        }),
+        .dependencies = &moduleDependencies(.{}),
     });
 
     // Since we can't pass `std.FileSource`s through `std.Build.dependency`,
@@ -70,8 +89,10 @@ pub fn build(b: *Build) void {
 
     // local testing & misc
 
-    const run_step = b.step("run", "Run the generator");
-    run_step.dependOn(&generate_bindings.step);
+    const install_file = b.addInstallFile(bindings_src, "gl.zig");
+    bindings_src.addStepDependencies(&install_file.step);
+
+    b.getInstallStep().dependOn(&install_file.step);
 }
 
 fn errorLogStep(
@@ -117,6 +138,7 @@ fn ErrorLogStep(
 
 fn ModuleDependenciesArrayFromStruct(comptime Struct: type) type {
     const info = @typeInfo(Struct).Struct;
+    std.debug.assert(!info.is_tuple or info.fields.len == 0);
     return [info.fields.len]Build.ModuleDependency;
 }
 inline fn moduleDependencies(
@@ -124,7 +146,6 @@ inline fn moduleDependencies(
 ) ModuleDependenciesArrayFromStruct(@TypeOf(dependency_struct)) {
     const DepStruct = @TypeOf(dependency_struct);
     const info = @typeInfo(DepStruct).Struct;
-    std.debug.assert(!info.is_tuple);
 
     var result: [info.fields.len]Build.ModuleDependency = undefined;
     inline for (info.fields) |field, i| {
