@@ -37,7 +37,7 @@ pub const Element = struct {
     }
 
     pub fn getAttributeIndex(elem: Element, name: []const u8) ?usize {
-        for (elem.attributes) |attr, index| {
+        for (elem.attributes, 0..) |attr, index| {
             if (!std.mem.eql(u8, attr.name, name)) continue;
             return index;
         }
@@ -55,38 +55,110 @@ pub const Element = struct {
     /// which is text data.
     /// If the child at `index` is not text data, and there exist no children
     /// after `index` which are text data, returns null.
-    /// asserts `index < elem.children.len`
+    /// Asserts `index < elem.children.len`.
     pub fn getTextIndex(elem: Element, index: usize) ?usize {
         assert(index < elem.children.len);
-        for (elem.children[index..]) |child, offset| {
+        for (elem.children[index..], index..) |child, offset| {
             switch (child) {
-                .text => return index + offset,
+                .text => return offset,
                 .element, .comment => continue,
             }
         }
         return null;
     }
 
-    /// Get the index of the first element with the specified name, which must either
-    /// be at `start_pos`, or after the same.
-    pub fn getChildElementIndexPos(elem: Element, name: []const u8, start_pos: usize) ?usize {
-        for (elem.children[start_pos..]) |child, index| {
-            const child_elem_name = switch (child) {
-                .element => |child_elem| child_elem.name,
-                .text, .comment => continue,
-            };
-            if (!std.mem.eql(u8, child_elem_name, name)) continue;
-            return start_pos + index;
-        }
-        return null;
-    }
-
     /// Get the first element with the specified name, which must either
     /// be at `start_pos`, or after the same.
+    /// Returns `null` if such an element does not exist.
     pub fn getChildElementPos(elem: Element, name: []const u8, start_pos: usize) ?Element {
         const index = elem.getChildElementIndexPos(name, start_pos) orelse return null;
         return elem.children[index].element;
     }
+
+    /// Get the index of the first element with the specified name,
+    /// which is either at `start_pos`, or after `start_pos`.
+    /// Returns `null` if such an element does not exist.
+    pub fn getChildElementIndexPos(elem: Element, name: []const u8, start_pos: usize) ?usize {
+        for (elem.children[start_pos..], start_pos..) |child, index| {
+            const child_elem_name: []const u8 = switch (child) {
+                .element => |child_elem| child_elem.name,
+                .text, .comment => continue,
+            };
+            if (!std.mem.eql(u8, child_elem_name, name)) continue;
+            return index;
+        }
+        return null;
+    }
+
+    /// Get the last element with the specified name.
+    /// Returns `null` if such an element does not exist.
+    pub fn getLastChildElement(elem: Element, name: []const u8) ?Element {
+        return @call(.always_inline, getLastChildElementPos, .{ elem, name, elem.children.len });
+    }
+
+    /// Get the last element with the specified name, which
+    /// exists before `limit_pos`.
+    /// Returns `null` if such an element does not exist.
+    /// Asserts `limit_pos <= elem.children.len`.
+    /// Asserts `limit_pos > 0`.
+    pub fn getLastChildElementPos(elem: Element, name: []const u8, limit_pos: usize) ?Element {
+        const index = elem.getLastChildElementIndexPos(name, limit_pos) orelse return null;
+        return elem.children[index].element;
+    }
+
+    /// Get the index of the last element with the specified name.
+    /// Returns `null` if such an element does not exist.
+    pub fn getLastChildElementIndex(elem: Element, name: []const u8) ?usize {
+        return @call(.always_inline, getLastChildElementIndexPos, .{ elem, name, elem.children.len });
+    }
+
+    /// Get the index of the last element with the specified name,
+    /// which exists before `limit_pos`.
+    /// Returns `null` if such an element does not exist.
+    /// Asserts `limit_pos <= elem.children.len`.
+    /// Asserts `limit_pos > 0`.
+    pub fn getLastChildElementIndexPos(elem: Element, name: []const u8, limit_pos: usize) ?usize {
+        assert(limit_pos <= elem.children.len);
+        assert(limit_pos > 0);
+        var iter = std.mem.reverseIterator(elem.children[0..limit_pos]);
+        var i: usize = limit_pos - 1;
+        while (iter.next()) |child| : (i -= 1) {
+            const child_elem_name: []const u8 = switch (child) {
+                .element => |child_elem| child_elem.name,
+                .text, .comment => continue,
+            };
+            if (std.mem.eql(u8, child_elem_name, name)) continue;
+            return i;
+        }
+        return null;
+    }
+
+    /// Returns an iterator over child elements with the specified name.
+    pub inline fn childElementIterator(elem: Element, name: []const u8) ChildElementIterator {
+        return .{
+            .root = elem,
+            .target_name = name,
+        };
+    }
+    pub const ChildElementIterator = struct {
+        root: Element,
+        target_name: []const u8,
+        index: usize = 0,
+
+        pub fn next(iter: *ChildElementIterator) ?Element {
+            const new_index = iter.root.getChildElementIndexPos(iter.target_name, iter.index) orelse {
+                iter.index = iter.root.children.len;
+                return null;
+            };
+            iter.index = new_index + 1;
+            return iter.root.children[new_index].element;
+        }
+
+        pub fn reset(iter: *ChildElementIterator) void {
+            const refreshed = iter.root.childElementIterator(iter.target_name);
+            iter.* = refreshed;
+        }
+    };
 
     pub inline fn fmt(elem: Element, options: struct { depth: u32 = 0 }) Formatter {
         return .{

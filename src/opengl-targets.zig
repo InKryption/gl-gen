@@ -25,14 +25,14 @@ pub const Version = enum {
     ES_VERSION_3_2,
     SC_VERSION_2_0,
 
-    pub inline fn stringWithGlPrefix(version: Version) []const u8 {
+    pub fn stringWithGlPrefix(version: Version) []const u8 {
         return switch (version) {
             inline else => |tag| "GL_" ++ @tagName(tag),
         };
     }
 };
 
-// TODO: Support other profiles
 pub const Profile = enum {
     core,
+    compatibility,
 };
