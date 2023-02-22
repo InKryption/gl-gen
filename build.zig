@@ -24,26 +24,32 @@ pub fn build(b: *Build) void {
     const generate_bindings = b.addRunArtifact(generator_exe);
 
     if (b.option([]const u8, "registry", "Path to the gl.xml registry file")) |xml_registry_path| {
+        // this is just so that a build.zig using this script as a dependency doesn't
+        // pass a path that we interpret as relative to this build.zig file.
         if (!std.fs.path.isAbsolute(xml_registry_path)) @panic("Must specify an absolute path to the gl.xml registry file");
         generate_bindings.addArg("--registry");
         generate_bindings.addArg(xml_registry_path);
     }
+
     if (b.option(gl_targets.Version, "version", "Version of OpenGL to target")) |version| {
         generate_bindings.addArg("--api-version");
         generate_bindings.addArg(@tagName(version));
     }
+
     if (b.option(gl_targets.Profile, "profile", "OpenGL profile to target")) |profile| {
         generate_bindings.addArg("--api-profile");
         generate_bindings.addArg(@tagName(profile));
-    }
-    if (b.option([]const []const u8, "extensions", "List of extension names to filter for")) |extensions| {
-        generate_bindings.addArg("--");
-        generate_bindings.addArgs(extensions);
     }
 
     // conveniently export a source file if the relevant arguments are provided.
     generate_bindings.addArg("--out");
     const bindings_src = generate_bindings.addOutputFileArg("gl.zig");
+
+    // make sure to add extension arguments afterwards if any are provided
+    if (b.option([]const []const u8, "extensions", "List of extension names to filter for")) |extensions| {
+        generate_bindings.addArg("--");
+        generate_bindings.addArgs(extensions);
+    }
 
     // with this, the user can just obtain the opengl bindings as a module
     // through `glgen_dep.module("opengl_bindings")`

@@ -120,7 +120,7 @@ pub const Element = struct {
     pub fn getLastChildElementIndexPos(elem: Element, name: []const u8, limit_pos: usize) ?usize {
         assert(limit_pos <= elem.children.len);
         assert(limit_pos > 0);
-        var iter = std.mem.reverseIterator(elem.children[0..limit_pos]);
+        var iter = std.mem.reverseIterator(elem.children[0 .. limit_pos - 1]);
         var i: usize = limit_pos - 1;
         while (iter.next()) |child| : (i -= 1) {
             const child_elem_name: []const u8 = switch (child) {

@@ -34,5 +34,6 @@ pub const Version = enum {
 
 pub const Profile = enum {
     core,
+    common,
     compatibility,
 };
