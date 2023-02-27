@@ -5,22 +5,14 @@ const gl_targets = @import("opengl-targets.zig");
 const assert = std.debug.assert;
 
 pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+    const log = std.log.default;
 
-    var stderr_buffered = std.io.bufferedWriter(std.io.getStdErr().writer());
-    defer {
-        var retries: u32 = 0;
-        while (retries < 3) : (retries += 1) {
-            stderr_buffered.flush() catch continue;
-            break;
-        }
-    }
-    const stderr = stderr_buffered.writer();
+    const allocator = std.heap.c_allocator;
 
     const args: GenerationArgs = args: {
         var args_iter = try std.process.argsWithAllocator(allocator);
         defer args_iter.deinit();
-        break :args try GenerationArgs.parse(allocator, &args_iter, stderr);
+        break :args try GenerationArgs.parse(allocator, &args_iter, .@"parse-gen-args");
     };
     defer args.deinit(allocator);
 
@@ -28,7 +20,10 @@ pub fn main() !void {
     const api_profile: gl_targets.Profile = args.api_profile;
 
     const tree: xml.Tree = tree: {
-        var buffered_gl_xml = std.io.bufferedReaderSize(32_768, args.gl_xml_file.reader());
+        const gl_xml_file = try std.fs.cwd().openFile(args.gl_xml_file_path, .{});
+        defer gl_xml_file.close();
+
+        var buffered_gl_xml = std.io.bufferedReaderSize(32_768, gl_xml_file.reader());
         const gl_xml_reader = buffered_gl_xml.reader();
 
         var error_line: u64 = undefined;
@@ -39,22 +34,142 @@ pub fn main() !void {
             .column = &error_column,
             .discard_comments = true,
             .discard_whitespace = true,
+            .transform_entity_refs = true,
         }) catch |err| {
-            try stderr.print("Parsing error encountered at {d}:{d} (line:column) of the registry.\n", .{ error_line + 1, error_column + 1 });
+            log.err("Parsing error encountered at {d}:{d} (line:column) of the registry.\n", .{ error_line + 1, error_column + 1 });
             return err;
         };
     };
     defer tree.deinit(allocator);
 
-    var out_writer_buffered = std.io.bufferedWriter(args.output_file.writer());
+    const registry = try Registry.parse(tree.root, allocator);
+    defer registry.deinit(allocator);
+
+    if (false) { // debug print the type decls in a nice format to stderr
+        for (registry.types) |type_entry| {
+            std.debug.print(
+                \\ * {s}:
+                \\  + requires: {?s}
+                \\  + API: {?s}
+                \\  + comment: {?s}
+                \\  + name in body: {}
+                \\  + C Definition: "
+            , .{
+                type_entry.name,
+                type_entry.requires,
+                if (type_entry.api) |tag| @tagName(tag) else null,
+                type_entry.comment,
+                type_entry.name_in_body,
+            });
+            switch (type_entry.type_def.apientry_indices) {
+                .one => |index| {
+                    std.debug.print("{s}<apientry/>{s}", .{
+                        type_entry.type_def.text[0..index],
+                        type_entry.type_def.text[index..],
+                    });
+                },
+                .many => |indices| {
+                    if (indices.len == 0) {
+                        std.debug.print("{s}", .{type_entry.type_def.text});
+                    } else {
+                        for (indices) |index| {
+                            std.debug.print("{s}<apientry/>", .{type_entry.type_def.text[0..index]});
+                        }
+                        std.debug.print("{s}", .{type_entry.type_def.text[indices[indices.len - 1]..]});
+                    }
+                },
+            }
+            std.debug.print("\"\n\n", .{});
+        }
+    }
+
+    if (false) { // debug print the enum sets in a nice format to stderr
+        for (registry.enum_sets) |set| {
+            std.debug.print(
+                \\ * namespace: {s}
+                \\ * group: {?s}
+                \\ * type: {?s}
+                \\ * vendor: {?s}
+                \\ * range: 
+            , .{
+                set.namespace,
+                set.group,
+                set.type,
+                set.vendor,
+            });
+            if (set.range) |range| {
+                std.debug.print(
+                    \\ {s}...{s}
+                    \\
+                , .{ range.start, range.end orelse range.start });
+            } else {
+                std.debug.print("null\n", .{});
+            }
+
+            std.debug.print(" * values:", .{});
+            if (set.values.len == 0)
+                std.debug.print(" (none)\n", .{})
+            else
+                std.debug.print("\n", .{});
+            for (set.values) |val| {
+                std.debug.print(
+                    \\   + {s} = {s}{s} (alias={?s}, group={?s})
+                    \\
+                , .{
+                    val.name,
+                    val.value,
+                    switch (val.type) {
+                        .none => "",
+                        inline else => |_, tag| @tagName(tag),
+                    },
+                    val.alias,
+                    val.group,
+                });
+            }
+
+            std.debug.print(" * unused ranges:", .{});
+            if (set.unused_ranges.len == 0)
+                std.debug.print(" (none)\n", .{})
+            else
+                std.debug.print("\n", .{});
+            for (set.unused_ranges) |unused_range| {
+                std.debug.print(
+                    \\   + {s}...{s}
+                , .{
+                    unused_range.range.start,
+                    unused_range.range.end orelse unused_range.range.start,
+                });
+                if (unused_range.vendor) |vendor| {
+                    std.debug.print(
+                        \\ ({s})
+                    , .{vendor});
+                }
+                if (unused_range.comment) |comment| {
+                    std.debug.print(
+                        \\: "{s}"
+                    , .{comment});
+                }
+                std.debug.print("\n", .{});
+            }
+
+            std.debug.print("\n", .{});
+        }
+    }
+
+    const output_file = try std.fs.cwd().createFile(args.output_file_path, .{});
+    defer output_file.close();
+
+    var out_writer_buffered = std.io.bufferedWriter(output_file.writer());
     const out = out_writer_buffered.writer();
+
+    if (true) return;
 
     var must_flush_out_writer_buffered = true;
     defer assert(!must_flush_out_writer_buffered or out_writer_buffered.end == 0);
     errdefer must_flush_out_writer_buffered = false;
 
     if (!std.mem.eql(u8, tree.root.name, "registry")) {
-        try stderr.print("Expected root element to be 'registry', found '{s}'.\n", .{tree.root.name});
+        log.err("Expected root element to be 'registry', found '{s}'.\n", .{tree.root.name});
         return error.InvalidRootElement;
     }
 
@@ -83,17 +198,17 @@ pub fn main() !void {
     { // write the comment element
         const name = "comment";
         const elem_index: usize = tree.root.getChildElementIndexPos(name, 0) orelse {
-            try stderr.print("Missing element '{s}'.\n", .{name});
+            log.err("Missing element '{s}'.\n", .{name});
             return error.MissingCommentElement;
         };
         if (tree.root.getChildElementIndexPos(name, elem_index + 1) != null) {
-            try stderr.print("Too many elements with name '{s}'.\n", .{name});
+            log.err("Too many elements with name '{s}'.\n", .{name});
             return error.TooManyCommentElements;
         }
         const element = tree.root.children[elem_index].element;
 
         if (element.children.len != 1 or element.children[0] != .text) {
-            try stderr.print("Expected only text in {s} element.\n", .{name});
+            log.err("Expected only text in {s} element.\n", .{name});
             return error.TooManyCommentElementChildren;
         }
 
@@ -130,480 +245,767 @@ pub fn main() !void {
         \\
         \\
     );
-
-    { // opengl type definitions
-
-        const elem_name = "types";
-
-        const elem_index = tree.root.getChildElementIndexPos(elem_name, 0) orelse {
-            try stderr.print("Missing element '{s}'.\n", .{elem_name});
-            return error.MissingTypesElement;
-        };
-        if (tree.root.getChildElementIndexPos(elem_name, elem_index + 1) != null) {
-            try stderr.print("Too many elements with name '{s}'.\n", .{elem_name});
-            return error.TooManyTypesElements;
-        }
-    }
-
-    blk: { // check for groups element, but ignore it.
-        const elem_name = "groups";
-
-        const elem_index = tree.root.getChildElementIndexPos(elem_name, 0) orelse {
-            try stderr.print("Missing element '{s}'.\n", .{elem_name});
-            break :blk;
-        };
-        if (tree.root.getChildElementIndexPos(elem_name, elem_index + 1) != null) {
-            try stderr.print("Too many elements with name '{s}'.\n", .{elem_name});
-            return error.TooManyTypesElements;
-        }
-    }
-
-    var required_enums = std.StringHashMap(void).init(allocator);
-    defer required_enums.deinit();
-
-    var required_commands = std.StringHashMap(void).init(allocator);
-    defer required_commands.deinit();
-
-    var required_types = std.StringHashMap(void).init(allocator);
-    defer required_types.deinit();
-
-    { // iterate feature & extension elements
-        var removed_enums = std.StringHashMap(void).init(allocator);
-        defer {
-            var iter = removed_enums.keyIterator();
-            while (iter.next()) |removed| {
-                _ = required_enums.remove(removed.*);
-            }
-            removed_enums.deinit();
-        }
-
-        var removed_commands = std.StringHashMap(void).init(allocator);
-        defer {
-            var iter = removed_commands.keyIterator();
-            while (iter.next()) |removed| {
-                _ = required_commands.remove(removed.*);
-            }
-            removed_commands.deinit();
-        }
-
-        var removed_types = std.StringHashMap(void).init(allocator);
-        defer {
-            var iter = removed_types.keyIterator();
-            while (iter.next()) |removed| {
-                _ = required_types.remove(removed.*);
-            }
-            removed_types.deinit();
-        }
-
-        // iterate feature elements
-        var feature_group_elem_iter = tree.root.childElementIterator("feature");
-        const target_feature_element: xml.Element = blk: {
-            while (feature_group_elem_iter.next()) |feature_elem| {
-                const feature_elem_index = feature_group_elem_iter.index - 1;
-                const name_val = feature_elem.getAttributeValue("name") orelse {
-                    try stderr.print("Feature element index {d} missing name.\n", .{feature_elem_index});
-                    return error.FeatureMissingNameAttribute;
-                };
-                if (std.mem.eql(u8, api_version.stringWithGlPrefix(), name_val)) {
-                    break :blk feature_elem;
-                }
-            }
-            try stderr.print("Registry contains no feature element with a 'name' attribute of value '{s}'.\n", .{api_version.stringWithGlPrefix()});
-            return error.MissingRequestedFeature;
-        };
-
-        const target_api_val: []const u8 = target_feature_element.getAttributeValue("api") orelse {
-            try stderr.print("Feature element of name '{s}' missing 'api' attribute.\n", .{api_version.stringWithGlPrefix()});
-            return error.MissingRequestedFeatureApi;
-        };
-
-        const target_number_val: []const u8 = target_feature_element.getAttributeValue("number") orelse {
-            try stderr.print("Feature element of name '{s}' missing 'number' attribute.\n", .{api_version.stringWithGlPrefix()});
-            return error.MissingRequestedFeatureNumber;
-        };
-
-        const FeatureSetType = enum { require, remove };
-        const FeatureRefType = enum { command, type, @"enum" };
-
-        const Number = struct {
-            major: u8,
-            minor: u8,
-
-            inline fn compare(a: @This(), b: @This()) std.math.Order {
-                return switch (std.math.order(a.major, b.major)) {
-                    .eq => std.math.order(a.minor, b.minor),
-                    .lt => .lt,
-                    .gt => .gt,
-                };
-            }
-
-            inline fn parseNumber(str: []const u8) !@This() {
-                var iter = std.mem.split(u8, str, ".");
-                const major_str = try (iter.next() orelse error.EmptyString);
-                const minor_str = try (iter.next() orelse error.MissingMinorVersion);
-                return @This(){
-                    .major = try std.fmt.parseUnsigned(u8, major_str, 10),
-                    .minor = try std.fmt.parseUnsigned(u8, minor_str, 10),
-                };
-            }
-        };
-        const target_number: Number = Number.parseNumber(target_number_val) catch |err| {
-            try stderr.print("Failed to parse number attribute of feature with name '{s}'.", .{api_version.stringWithGlPrefix()});
-            return err;
-        };
-
-        feature_group_elem_iter.reset();
-        while (feature_group_elem_iter.next()) |feature_group_elem| {
-            const feature_group_elem_index = feature_group_elem_iter.index - 1;
-            const api_val: []const u8 = feature_group_elem.getAttributeValue("api") orelse {
-                try stderr.print("Feature element index {d} missing api attribute.\n", .{feature_group_elem_index});
-                continue;
-            };
-            const name_val: []const u8 = feature_group_elem.getAttributeValue("name") orelse {
-                try stderr.print("Feature element index {d} missing name attribute.\n", .{feature_group_elem_index});
-                continue;
-            };
-            const number_val: []const u8 = feature_group_elem.getAttributeValue("number") orelse {
-                try stderr.print("Feature element index {d} missing number attribute.\n", .{feature_group_elem_index});
-                continue;
-            };
-
-            if (!std.mem.eql(u8, api_val, target_api_val)) continue;
-            const number = Number.parseNumber(number_val) catch |err| {
-                try stderr.print("Failed to parse number attribute of feature with name '{s}' (parsing error: {s}).", .{ api_version.stringWithGlPrefix(), @errorName(err) });
-                continue;
-            };
-            switch (number.compare(target_number)) {
-                .gt => continue,
-                .lt, .eq => {},
-            }
-
-            for (feature_group_elem.children) |feature_group_child| {
-                const feature_set_elem: xml.Element = switch (feature_group_child) {
-                    .element => |elem| elem,
-                    .comment => continue,
-                    .text => {
-                        try stderr.print("Encountered unexpected text in feature feature element index {d}.\n", .{feature_group_elem_index});
-                        continue;
-                    },
-                };
-                const feature_set_type: FeatureSetType = std.meta.stringToEnum(FeatureSetType, feature_set_elem.name) orelse {
-                    try stderr.print(
-                        "Encountered unrecognized feature set type '{s}' in feature element index {d}.\n",
-                        .{ feature_set_elem.name, feature_group_elem_index },
-                    );
-                    continue;
-                };
-
-                // some 'require'/'remove' elements have a 'profile' element.
-                // none that I've seen have an 'api' element, unlike in the case of 'extension'
-                // elements, dealt with further down, which is the main reason this might
-                // seem duplicated.
-                if (feature_set_elem.getAttributeValue("profile")) |feature_set_profile_str| {
-                    const feature_set_profile = std.meta.stringToEnum(gl_targets.Profile, feature_set_profile_str) orelse {
-                        try stderr.print("Feature set in group '{s}' has unrecognised profile '{s}'.\n", .{ name_val, feature_set_profile_str });
-                        continue;
-                    };
-                    if (feature_set_profile != api_profile) {
-                        continue;
-                    }
-                }
-
-                for (feature_set_elem.children) |feature_set_child| {
-                    const feature_ref_elem: xml.Element = switch (feature_set_child) {
-                        .element => |elem| elem,
-                        .comment => continue,
-                        .text => |text| {
-                            try stderr.print("Encountered unexpected text in feature set. Unexpected text: '{s}'.\n", .{text});
-                            continue;
-                        },
-                    };
-                    const feature_ref_type = std.meta.stringToEnum(FeatureRefType, feature_ref_elem.name) orelse {
-                        try stderr.print("Encountered unrecognized feature ref type '{s}'.\n", .{feature_ref_elem.name});
-                        continue;
-                    };
-                    const feature_ref_name = feature_ref_elem.getAttributeValue("name") orelse {
-                        try stderr.print("Missing 'name' attribute in feature reference.\n", .{});
-                        continue;
-                    };
-
-                    switch (feature_ref_type) {
-                        .command => switch (feature_set_type) {
-                            .require => try required_commands.put(feature_ref_name, {}),
-                            .remove => try removed_commands.put(feature_ref_name, {}),
-                        },
-                        .type => switch (feature_set_type) {
-                            .require => try required_commands.put(feature_ref_name, {}),
-                            .remove => try removed_commands.put(feature_ref_name, {}),
-                        },
-                        .@"enum" => switch (feature_set_type) {
-                            .require => try required_enums.put(feature_ref_name, {}),
-                            .remove => try removed_enums.put(feature_ref_name, {}),
-                        },
-                    }
-                }
-            }
-        }
-
-        // iterate the extension elements inside the "extension" element
-        // get requested extensions as a set for quick lookup.
-        const requested_extension_set: std.StringHashMap(void) = blk: {
-            var requested_extension_set = std.StringHashMap(void).init(allocator);
-            try requested_extension_set.ensureTotalCapacity(std.math.lossyCast(u32, args.extensions.len));
-            for (args.extensions) |ext| {
-                const gop = try requested_extension_set.getOrPut(ext);
-                if (gop.found_existing)
-                    try stderr.print("Extension '{s}' specified multiple times.\n", .{ext});
-            }
-            break :blk requested_extension_set;
-        };
-        defer {
-            var copy = requested_extension_set;
-            copy.deinit();
-        }
-
-        const extensions_element: xml.Element = blk: {
-            const extensions_element_index = tree.root.getChildElementIndexPos("extensions", 0) orelse {
-                try stderr.writeAll("Missing element 'extensions'.\n");
-                return error.MissingExtensionsElement;
-            };
-            if (tree.root.getChildElementIndexPos("extensions", extensions_element_index + 1) != null) {
-                try stderr.writeAll("Found more than one 'extensions' element.");
-                return error.TooManyExtensionsElements;
-            }
-            break :blk tree.root.children[extensions_element_index].element;
-        };
-
-        for (extensions_element.children, 0..) |extensions_child, extensions_child_index| {
-            const ext_elem: xml.Element = switch (extensions_child) {
-                .comment => continue,
-                .text => |text| {
-                    try stderr.print("Unexpected text found in extension element. Unexpected text: '{s}'.\n", .{text});
-                    continue;
-                },
-                .element => |elem| blk: {
-                    if (std.mem.eql(u8, elem.name, "extension")) break :blk elem;
-                    try stderr.print("Unexpected non-extension child element in extensions element '{s}'.", .{elem.name});
-                    continue;
-                },
-            };
-            const ext_name = ext_elem.getAttributeValue("name") orelse {
-                try stderr.print("Extension element index {d} missing 'name' attribute.\n", .{extensions_child_index});
-                continue;
-            };
-            if (!requested_extension_set.contains(ext_name)) continue;
-
-            { // check whether the extension supports/is supported by the target API.
-                const ext_supported_apis_str = ext_elem.getAttributeValue("supported") orelse {
-                    try stderr.print("Extension element '{s}' missing 'supported' attribute.\n", .{ext_name});
-                    continue;
-                };
-                var ext_supported_apis_iter = std.mem.split(u8, ext_supported_apis_str, "|");
-                while (ext_supported_apis_iter.next()) |supported_api| {
-                    if (std.mem.eql(u8, target_api_val, supported_api)) break;
-                } else {
-                    try stderr.print(
-                        "Requested extension '{s}' does not support target API '{s}' (specified by '{s}').\n",
-                        .{ ext_name, target_api_val, api_version.stringWithGlPrefix() },
-                    );
-                    continue;
-                }
-            }
-
-            for (ext_elem.children) |ext_elem_child| {
-                const feature_set_elem: xml.Element = switch (ext_elem_child) {
-                    .element => |elem| elem,
-                    .comment => continue,
-                    .text => |text| {
-                        try stderr.print("Unexpected text in extension element '{s}'. Unexpected text: '{s}'.\n", .{ ext_name, text });
-                        continue;
-                    },
-                };
-                const feature_set_type: FeatureSetType = std.meta.stringToEnum(FeatureSetType, feature_set_elem.name) orelse {
-                    try stderr.print("Encountered unrecognized feature set type '{s}' in extension element '{s}'.\n", .{ feature_set_elem.name, ext_name });
-                    continue;
-                };
-
-                if (feature_set_elem.getAttributeValue("api")) |feature_set_api_str| {
-                    if (!std.mem.eql(u8, target_api_val, feature_set_api_str)) continue;
-                }
-                if (feature_set_elem.getAttributeValue("profile")) |feature_set_profile_str| {
-                    const feature_set_profile = std.meta.stringToEnum(gl_targets.Profile, feature_set_profile_str) orelse {
-                        try stderr.print(
-                            "Feature set in extension '{s}' has unrecognized profile type '{s}'.\n",
-                            .{ ext_name, feature_set_profile_str },
-                        );
-                        continue;
-                    };
-                    if (feature_set_profile != api_profile) continue;
-                }
-
-                for (feature_set_elem.children) |feature_set_child| {
-                    const feature_ref_elem: xml.Element = switch (feature_set_child) {
-                        .element => |elem| elem,
-                        .comment => continue,
-                        .text => |text| {
-                            try stderr.print("Encountered unexpected text in feature set. Unexpected text: '{s}'.\n", .{text});
-                            continue;
-                        },
-                    };
-                    const feature_ref_type = std.meta.stringToEnum(FeatureRefType, feature_ref_elem.name) orelse {
-                        try stderr.print("Encountered unrecognized feature ref type '{s}'.\n", .{feature_ref_elem.name});
-                        continue;
-                    };
-                    const feature_ref_name = feature_ref_elem.getAttributeValue("name") orelse {
-                        try stderr.print("Missing 'name' attribute in feature reference.\n", .{});
-                        continue;
-                    };
-
-                    switch (feature_ref_type) {
-                        .command => switch (feature_set_type) {
-                            .require => try required_commands.put(feature_ref_name, {}),
-                            .remove => try removed_commands.put(feature_ref_name, {}),
-                        },
-                        .type => switch (feature_set_type) {
-                            .require => try required_commands.put(feature_ref_name, {}),
-                            .remove => try removed_commands.put(feature_ref_name, {}),
-                        },
-                        .@"enum" => switch (feature_set_type) {
-                            .require => try required_enums.put(feature_ref_name, {}),
-                            .remove => try removed_enums.put(feature_ref_name, {}),
-                        },
-                    }
-                }
-            }
-        }
-    }
-
-    // represents the (name)-(integer value) mapping of enum values,
-    // except with the integers still in string form, so as to note lose
-    // information, like the base it was written in.
-    var enum_values = std.StringHashMap([]const u8).init(allocator);
-    defer enum_values.deinit();
-
-    var enum_groups = std.StringHashMap([]const []const u8).init(allocator);
-    defer {
-        var iter = enum_groups.valueIterator(); // only free the slices of strings, and not the strings themselves (owned by the XML tree).
-        while (iter.next()) |slice| allocator.free(slice.*);
-        enum_groups.deinit();
-    }
-
-    {
-        var growable_enum_groups = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(allocator);
-        defer {
-            var iter = growable_enum_groups.valueIterator();
-            while (iter.next()) |arraylist| arraylist.deinit(allocator);
-            growable_enum_groups.deinit();
-        }
-
-        var enums_elem_iter = tree.root.childElementIterator("enums");
-        var elem_index: usize = 0;
-        while (enums_elem_iter.next()) |enum_collection_element| : (elem_index += 1) {
-            const enum_collection_namespace = enum_collection_element.getAttribute("namespace") orelse {
-                try stderr.print("Enums element index {d} missing 'namespace' attribute.\n", .{elem_index});
-                continue;
-            };
-            _ = enum_collection_namespace;
-
-            for (enum_collection_element.children) |child| {
-                const enum_element: xml.Element = switch (child) {
-                    .element => |elem| elem,
-                    .comment => continue,
-                    .text => |text| {
-                        try stderr.print("Encountered unexpected text in enums element index {d}. Text: '{s}'.\n", .{ elem_index, text });
-                        continue;
-                    },
-                };
-                if (enum_element.children.len != 0) {
-                    try stderr.print("Enum contains unexpected children in enums element index {d}.\n", .{elem_index});
-                }
-                if (std.mem.eql(u8, enum_element.name, "unused")) {
-                    continue;
-                }
-
-                const value_str = enum_element.getAttributeValue("value") orelse {
-                    try stderr.print("Enum missing value attribute in enums element index {d}.\n", .{elem_index});
-                    return error.MalformedEnum;
-                };
-                const name_str = enum_element.getAttributeValue("name") orelse {
-                    try stderr.print("Enum missing name attribute in enums element index {d}.\n", .{elem_index});
-                    return error.MalformedEnum;
-                };
-
-                if (!required_enums.contains(name_str)) continue;
-                _ = std.fmt.parseInt(i128, value_str, 0) catch |err| {
-                    try stderr.print("Failed to parse value of enum with name '{s}' (value string: '{s}').\n", .{ name_str, value_str });
-                    return err;
-                };
-                try enum_values.putNoClobber(name_str, value_str);
-
-                const enum_groups_str = enum_element.getAttributeValue("group") orelse {
-                    const lower_cased_name = try std.ascii.allocLowerString(allocator, name_str["GL_".len..]);
-                    defer allocator.free(lower_cased_name);
-                    try out.print("pub const {s} = {s};\n", .{ std.zig.fmtId(lower_cased_name), value_str });
-                    continue;
-                };
-
-                var enum_group_iter = std.mem.split(u8, enum_groups_str, ",");
-                while (enum_group_iter.next()) |enum_group_name| {
-                    const gop = try growable_enum_groups.getOrPut(enum_group_name);
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = .{};
-                    }
-                    try gop.value_ptr.append(allocator, name_str);
-                }
-            }
-        }
-
-        var growable_egs_iter = growable_enum_groups.iterator();
-        while (growable_egs_iter.next()) |entry| {
-            const SortNamesByValueContext = struct {
-                enum_names: [][]const u8,
-                enum_values: *const std.StringHashMap([]const u8),
-
-                pub inline fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                    const a_val_str = ctx.enum_values.get(ctx.enum_names[a]).?;
-                    const b_val_str = ctx.enum_values.get(ctx.enum_names[b]).?;
-
-                    const a_val = std.fmt.parseInt(i128, a_val_str, 0) catch unreachable;
-                    const b_val = std.fmt.parseInt(i128, b_val_str, 0) catch unreachable;
-
-                    return a_val < b_val;
-                }
-                pub inline fn swap(ctx: @This(), a: usize, b: usize) void {
-                    std.mem.swap([]const u8, &ctx.enum_names[a], &ctx.enum_names[b]);
-                }
-            };
-
-            const enum_names_slice: [][]const u8 = try entry.value_ptr.toOwnedSlice(allocator);
-            std.sort.sortContext(enum_names_slice.len, SortNamesByValueContext{
-                .enum_names = enum_names_slice,
-                .enum_values = &enum_values,
-            });
-            try enum_groups.putNoClobber(entry.key_ptr.*, enum_names_slice);
-        }
-    }
-
-    var group_iter = enum_groups.iterator();
-    while (group_iter.next()) |entry| {
-        try out.print("pub const {s} = enum(gl.Enum) {{\n", .{entry.key_ptr.*});
-        for (entry.value_ptr.*) |name| {
-            const value = enum_values.get(name).?;
-
-            const lower_cased_name = try std.ascii.allocLowerString(allocator, name["GL_".len..]);
-            defer allocator.free(lower_cased_name);
-
-            try out.print("    {s} = {s},\n", .{ std.zig.fmtId(lower_cased_name), value });
-        }
-        try out.writeAll("};\n");
-    }
-
-    try out_writer_buffered.flush();
 }
 
+const Registry = struct {
+    /// Text content of the '<comment>' element (presumably only one).
+    comment: ?[]const u8,
+    /// '<type>' entries from the '<types>' element (presumably there is usually only one).
+    types: []const TypeEntry,
+    /// true if registry contains '<groups>' element.
+    groups_elem: bool,
+    enum_sets: []const EnumsSet,
+    /// '<commands>' element (presumably there is usually only one).
+    commands: Commands,
+    features: []const FeatureSetGroup,
+    /// '<extension>' elements from the '<extensions>' element (presumably there is usually only one).
+    extensions: []const Extension,
+
+    pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
+        const top_level_comment: ?[]const u8 = blk: {
+            if (tree.getChildElementIndexPos("comment", 0)) |comment_elem_index| {
+                if (tree.getChildElementIndexPos("comment", comment_elem_index + 1) != null) {
+                    return error.TooManyTopLevelCommentElements;
+                }
+                const elem = tree.children[comment_elem_index].element;
+                if (elem.attributes.len != 0)
+                    return error.TopLevelCommentElementHasAttributes;
+                if (elem.children.len == 0)
+                    return error.EmptyTopLevelCommentElement;
+                if (elem.children.len != 1 or elem.children[0] != .text)
+                    return error.TopLevelCommentElementHasWeirdData;
+                const duped_text = try allocator.dupe(u8, elem.children[0].text);
+                errdefer allocator.free(duped_text);
+                break :blk duped_text;
+            }
+            break :blk null;
+        };
+        errdefer allocator.free(top_level_comment orelse "");
+
+        const types: []const TypeEntry = types: {
+            var types = std.ArrayList(TypeEntry).init(allocator);
+            defer types.deinit();
+            errdefer for (types.items) |entry| entry.deinit(allocator);
+
+            var c_def_text_buffer = std.ArrayList(u8).init(allocator);
+            defer c_def_text_buffer.deinit();
+
+            const types_elem_index = tree.getChildElementIndexPos("types", 0) orelse {
+                return error.MissingTypesElement;
+            };
+            if (tree.getChildElementIndexPos("types", types_elem_index + 1) != null)
+                return error.TooManyTypesElements;
+            const types_elem = tree.children[types_elem_index].element;
+
+            for (types_elem.children) |types_elem_child| {
+                const type_elem: xml.Element = switch (types_elem_child) {
+                    .element => |elem| elem,
+                    .comment => continue,
+                    .text => return error.UnexpectedTextInTypesElement,
+                };
+                if (!std.mem.eql(u8, type_elem.name, "type")) {
+                    return error.UnexpectedNonTypeElementInTypesElement;
+                }
+
+                const requires: ?[]const u8 =
+                    if (type_elem.getAttributeValue("requires")) |requires| try allocator.dupe(u8, requires) else null;
+                errdefer allocator.free(requires orelse "");
+
+                const api: ?gl_targets.Api = api: {
+                    const api_str = type_elem.getAttributeValue("api") orelse break :api null;
+                    const api = try (std.meta.stringToEnum(gl_targets.Api, api_str) orelse
+                        error.UnrecognisedApiInTypeAttribute);
+                    break :api api;
+                };
+
+                const comment: ?[]const u8 = comment: {
+                    const comment = type_elem.getAttributeValue("comment") orelse break :comment null;
+                    break :comment try allocator.dupe(u8, comment);
+                };
+                errdefer allocator.free(comment orelse "");
+
+                const maybe_name_attribute: ?[]const u8 = type_elem.getAttributeValue("name");
+                const maybe_name_elem_index: ?usize = type_elem.getChildElementIndexPos("name", 0);
+
+                if (maybe_name_attribute == null and maybe_name_elem_index == null) {
+                    return error.TypeMissingName;
+                }
+                if (maybe_name_attribute != null and maybe_name_elem_index != null) {
+                    return error.RedundantTypeNames;
+                }
+
+                const type_name: []const u8 = name: {
+                    if (maybe_name_attribute) |attr_val| {
+                        break :name try allocator.dupe(u8, attr_val);
+                    }
+                    const type_name_elem = type_elem.children[maybe_name_elem_index.?].element;
+                    if (type_name_elem.children.len == 0)
+                        return error.TypeNameElementMissingText;
+                    if (type_name_elem.children.len != 1 or type_name_elem.children[0] != .text)
+                        return error.TypeNameElementHasTooManyChildren;
+                    break :name try allocator.dupe(u8, type_name_elem.children[0].text);
+                };
+                errdefer allocator.free(type_name);
+
+                const type_def: TypeEntry.TypeDef = def: {
+                    var type_def_text = std.ArrayList(u8).init(allocator);
+                    defer type_def_text.deinit();
+
+                    var apientry_indices_list = try std.ArrayList(usize).initCapacity(allocator, 1);
+                    defer apientry_indices_list.deinit();
+
+                    for (type_elem.children, 0..) |type_elem_child, i| {
+                        switch (type_elem_child) {
+                            .comment => continue,
+                            .text => |text| try type_def_text.appendSlice(text),
+                            .element => |elem| {
+                                const name_tag = std.meta.stringToEnum(enum { name, apientry }, elem.name) orelse {
+                                    return error.UnrecognisedTypeDefElement;
+                                };
+                                switch (name_tag) {
+                                    .apientry => try apientry_indices_list.append(type_def_text.items.len),
+                                    .name => {
+                                        assert(maybe_name_elem_index != null and i == maybe_name_elem_index.?);
+                                        assert(elem.children.len == 1);
+                                        try type_def_text.appendSlice(elem.children[0].text);
+                                    },
+                                }
+                            },
+                        }
+                    }
+
+                    const text = try type_def_text.toOwnedSlice();
+                    errdefer allocator.free(text);
+
+                    const apientry_indices = if (apientry_indices_list.items.len == 1)
+                        TypeEntry.TypeDef.ApientryIndices{ .one = apientry_indices_list.items[0] }
+                    else
+                        TypeEntry.TypeDef.ApientryIndices{ .many = try apientry_indices_list.toOwnedSlice() };
+                    errdefer apientry_indices;
+
+                    break :def TypeEntry.TypeDef{
+                        .text = text,
+                        .apientry_indices = apientry_indices,
+                    };
+                };
+                errdefer type_def.deinit(allocator);
+
+                try types.append(TypeEntry{
+                    .requires = requires,
+                    .name = type_name,
+                    .name_in_body = maybe_name_elem_index != null,
+                    .api = api,
+                    .comment = comment,
+                    .type_def = type_def,
+                });
+            }
+
+            break :types try types.toOwnedSlice();
+        };
+        errdefer {
+            for (types) |entry| entry.deinit(allocator);
+            allocator.free(types);
+        }
+
+        const enum_sets: []const EnumsSet = enum_sets: {
+            var enum_sets = std.ArrayList(EnumsSet).init(allocator);
+            defer enum_sets.deinit();
+            errdefer for (enum_sets.items) |entry| entry.deinit(allocator);
+
+            var enum_set_elem_iter = tree.childElementIterator("enums");
+            while (enum_set_elem_iter.next()) |enum_set_elem| {
+                const namespace = if (enum_set_elem.getAttributeValue("namespace")) |str|
+                    try allocator.dupe(u8, str)
+                else {
+                    return error.EnumsGroupMissingNamespace;
+                };
+                errdefer allocator.free(namespace);
+
+                const enum_set_type: ?[]const u8 = if (enum_set_elem.getAttributeValue("type")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(enum_set_type orelse "");
+
+                const enum_set_range: ?EnumsSet.ValueRange = blk: {
+                    const maybe_start_attr = enum_set_elem.getAttributeValue("start");
+                    const maybe_end_attr = enum_set_elem.getAttributeValue("end");
+
+                    if (maybe_start_attr == null and maybe_end_attr == null) break :blk null;
+                    if (maybe_start_attr != null and maybe_end_attr == null) return error.StartMissingEndAttribute;
+                    if (maybe_start_attr == null and maybe_end_attr != null) return error.EndMissingStartAttribute;
+                    assert(maybe_start_attr != null and maybe_end_attr != null);
+
+                    const duped_start = try allocator.dupe(u8, maybe_start_attr.?);
+                    errdefer allocator.free(duped_start);
+
+                    const duped_end = try allocator.dupe(u8, maybe_end_attr.?);
+                    errdefer allocator.free(duped_end);
+
+                    break :blk EnumsSet.ValueRange{
+                        .start = duped_start,
+                        .end = duped_end,
+                    };
+                };
+                errdefer if (enum_set_range) |unwrapped| unwrapped.deinit(allocator);
+
+                const enum_set_vendor: ?[]const u8 = if (enum_set_elem.getAttributeValue("vendor")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(enum_set_vendor orelse "");
+
+                const enum_set_comment: ?[]const u8 = if (enum_set_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(enum_set_comment orelse "");
+
+                const enum_set_group: ?[]const u8 = if (enum_set_elem.getAttributeValue("group")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(enum_set_group orelse "");
+
+                var values_list = std.ArrayList(EnumsSet.Value).init(allocator);
+                defer values_list.deinit();
+                errdefer for (values_list.items) |val| val.deinit(allocator);
+
+                var unused_ranges_list = std.ArrayList(EnumsSet.UnusedRange).init(allocator);
+                defer unused_ranges_list.deinit();
+                errdefer for (unused_ranges_list.items) |unused_range| unused_range.deinit(allocator);
+
+                // iterate and collect elements
+                for (enum_set_elem.children) |enums_group_child| {
+                    const enum_entry: xml.Element = switch (enums_group_child) {
+                        .comment => continue,
+                        .element => |elem| elem,
+                        .text => return error.UnexpectedTextInEnumsGroupElement,
+                    };
+                    const elem_tag = std.meta.stringToEnum(enum { @"enum", unused }, enum_entry.name) orelse {
+                        return error.UnexpectedElementName;
+                    };
+                    switch (elem_tag) {
+                        .@"enum" => {
+                            const value_name: []const u8 = if (enum_entry.getAttributeValue("name")) |str|
+                                try allocator.dupe(u8, str)
+                            else {
+                                return error.EnumEntryMissingName;
+                            };
+                            errdefer allocator.free(value_name);
+
+                            const value_int: []const u8 = if (enum_entry.getAttributeValue("value")) |str|
+                                try allocator.dupe(u8, str)
+                            else {
+                                return error.EnumEntryMissingValue;
+                            };
+                            errdefer allocator.free(value_int);
+
+                            const value_alias: ?[]const u8 = if (enum_entry.getAttributeValue("alias")) |str| try allocator.dupe(u8, str) else null;
+                            errdefer allocator.free(value_alias orelse "");
+
+                            const value_group: ?[]const u8 = if (enum_entry.getAttributeValue("group")) |str| try allocator.dupe(u8, str) else null;
+                            errdefer allocator.free(value_group orelse "");
+
+                            const value_api: ?gl_targets.Api = blk: {
+                                const str = enum_entry.getAttributeValue("api") orelse break :blk null;
+                                break :blk try (std.meta.stringToEnum(gl_targets.Api, str) orelse error.UnrecognisedApi);
+                            };
+
+                            const ValueTag = enum {
+                                u,
+                                l,
+                                ll,
+
+                                lu,
+                                ul,
+
+                                llu,
+                                ull,
+                            };
+                            const value_type: EnumsSet.Value.Type = blk: {
+                                const str = enum_entry.getAttributeValue("type") orelse break :blk .none;
+                                break :blk switch (try (std.meta.stringToEnum(ValueTag, str) orelse error.UnrecognizedEnumValueTypeSuffix)) {
+                                    .u => .u,
+                                    .l => .l,
+                                    .ll => .ll,
+                                    .lu, .ul => .lu,
+                                    .llu, .ull => .llu,
+                                };
+                            };
+
+                            try values_list.append(EnumsSet.Value{
+                                .name = value_name,
+                                .value = value_int,
+                                .api = value_api,
+                                .type = value_type,
+                                .group = value_group,
+                                .alias = value_alias,
+                            });
+                        },
+                        .unused => {
+                            const unused_range_vendor: ?[]const u8 = if (enum_entry.getAttributeValue("vendor")) |str| try allocator.dupe(u8, str) else null;
+                            errdefer allocator.free(unused_range_vendor orelse "");
+
+                            const unused_range_comment: ?[]const u8 = if (enum_entry.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                            errdefer allocator.free(unused_range_comment orelse "");
+
+                            const unused_range_val: EnumsSet.ValueRange = blk: {
+                                const start_attr: []const u8 = if (enum_entry.getAttributeValue("start")) |str|
+                                    try allocator.dupe(u8, str)
+                                else
+                                    return error.MissingStartAttribute;
+                                errdefer allocator.free(start_attr);
+
+                                const end_attr: ?[]const u8 = if (enum_entry.getAttributeValue("end")) |str| try allocator.dupe(u8, str) else null;
+                                errdefer allocator.free(end_attr orelse "");
+
+                                break :blk EnumsSet.ValueRange{
+                                    .start = start_attr,
+                                    .end = end_attr,
+                                };
+                            };
+                            errdefer unused_range_val.deinit(allocator);
+
+                            try unused_ranges_list.append(EnumsSet.UnusedRange{
+                                .range = unused_range_val,
+                                .vendor = unused_range_vendor,
+                                .comment = unused_range_comment,
+                            });
+                        },
+                    }
+                }
+
+                const values = try values_list.toOwnedSlice();
+                errdefer allocator.free(values);
+                errdefer for (values) |val| val.deinit(allocator);
+                assert(values_list.items.len == 0);
+
+                const unused_ranges = try unused_ranges_list.toOwnedSlice();
+                errdefer allocator.free(unused_ranges);
+                errdefer for (unused_ranges) |unused_range| unused_range.deinit(allocator);
+                assert(unused_ranges_list.items.len == 0);
+
+                try enum_sets.append(EnumsSet{
+                    .namespace = namespace,
+                    .type = enum_set_type,
+                    .group = enum_set_group,
+                    .vendor = enum_set_vendor,
+                    .range = enum_set_range,
+                    .comment = enum_set_comment,
+
+                    .values = values,
+                    .unused_ranges = unused_ranges,
+                });
+            }
+
+            break :enum_sets try enum_sets.toOwnedSlice();
+        };
+        errdefer {
+            for (enum_sets) |set| set.deinit(allocator);
+            allocator.free(enum_sets);
+        }
+
+        return std.mem.zeroInit(Registry, .{
+            .comment = top_level_comment,
+            .types = types,
+            .groups_elem = blk: {
+                const first_index = tree.getChildElementIndexPos("groups", 0);
+                if (first_index != null and tree.getChildElementIndexPos("groups", first_index.? + 1) != null) return error.TooManyGroupElements;
+                break :blk first_index != null;
+            },
+            .enum_sets = enum_sets,
+        });
+        // return Registry{
+        //     .comment = top_level_comment,
+        //     .types = types,
+        //     .enum_sets = enum_sets,
+        // };
+    }
+
+    pub fn deinit(reg: Registry, allocator: std.mem.Allocator) void {
+        allocator.free(reg.comment orelse "");
+
+        for (reg.types) |entry| entry.deinit(allocator);
+        allocator.free(reg.types);
+
+        for (reg.enum_sets) |enums_group| enums_group.deinit(allocator);
+        allocator.free(reg.enum_sets);
+
+        reg.commands.deinit(allocator);
+
+        for (reg.features) |feature_set_group| feature_set_group.deinit(allocator);
+        allocator.free(reg.features);
+
+        for (reg.extensions) |extension| extension.deinit(allocator);
+        allocator.free(reg.extensions);
+    }
+
+    const TypeEntry = struct {
+        requires: ?[]const u8,
+        name: []const u8,
+        /// True if the name was found in the body of the type definition
+        /// in a '<name>' element, instead of as an attribute
+        name_in_body: bool,
+        api: ?gl_targets.Api,
+        comment: ?[]const u8,
+        type_def: TypeDef,
+
+        pub fn deinit(self: TypeEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.requires orelse "");
+            allocator.free(self.name);
+            allocator.free(self.comment orelse "");
+            self.type_def.deinit(allocator);
+        }
+
+        const TypeDef = struct {
+            text: []const u8,
+            /// indices into the `text` where <apientry/> elements would be.
+            apientry_indices: ApientryIndices,
+
+            pub fn deinit(self: TypeDef, allocator: std.mem.Allocator) void {
+                allocator.free(self.text);
+                self.apientry_indices.deinit(allocator);
+            }
+
+            const ApientryIndices = union(enum) {
+                one: usize,
+                many: []const usize,
+
+                pub fn deinit(self: ApientryIndices, allocator: std.mem.Allocator) void {
+                    switch (self) {
+                        .one => {},
+                        .many => |many| allocator.free(many),
+                    }
+                }
+            };
+        };
+    };
+
+    const EnumsSet = struct {
+        namespace: []const u8,
+        type: ?[]const u8,
+        group: ?[]const u8,
+        vendor: ?[]const u8,
+        range: ?ValueRange,
+        comment: ?[]const u8,
+
+        values: []const Value,
+        unused_ranges: []const UnusedRange,
+
+        pub fn deinit(self: EnumsSet, allocator: std.mem.Allocator) void {
+            allocator.free(self.namespace);
+            allocator.free(self.type orelse "");
+            allocator.free(self.group orelse "");
+            allocator.free(self.vendor orelse "");
+            if (self.range) |range| range.deinit(allocator);
+            allocator.free(self.comment orelse "");
+
+            for (self.values) |value| value.deinit(allocator);
+            allocator.free(self.values);
+
+            for (self.unused_ranges) |range| range.deinit(allocator);
+            allocator.free(self.unused_ranges);
+        }
+
+        const Value = struct {
+            name: []const u8,
+            value: []const u8,
+            api: ?gl_targets.Api,
+            type: Type,
+            group: ?[]const u8,
+            alias: ?[]const u8,
+
+            pub fn deinit(self: Value, allocator: std.mem.Allocator) void {
+                allocator.free(self.name);
+                allocator.free(self.value);
+                allocator.free(self.group orelse "");
+                allocator.free(self.alias orelse "");
+            }
+
+            const Type = union(std.c.Token.NumSuffix) {
+                none,
+                f: noreturn,
+                l,
+                u,
+                lu,
+                ll,
+                llu,
+            };
+        };
+        const UnusedRange = struct {
+            range: ValueRange,
+            vendor: ?[]const u8,
+            comment: ?[]const u8,
+
+            pub fn deinit(self: UnusedRange, allocator: std.mem.Allocator) void {
+                self.range.deinit(allocator);
+                allocator.free(self.vendor orelse "");
+                allocator.free(self.comment orelse "");
+            }
+        };
+        const ValueRange = struct {
+            start: []const u8,
+            /// null indicates that 'start' is the only value within the range.
+            end: ?[]const u8,
+
+            pub fn deinit(self: ValueRange, allocator: std.mem.Allocator) void {
+                allocator.free(self.start);
+                allocator.free(self.end orelse "");
+            }
+        };
+    };
+
+    const Commands = struct {
+        namespace: []const u8,
+        /// list of the contained '<command>' element tags.
+        entries: []const Entry,
+
+        pub fn deinit(self: Commands, allocator: std.mem.Allocator) void {
+            allocator.free(self.namespace);
+            for (self.entries) |entry| entry.deinit(allocator);
+            allocator.free(self.entries);
+        }
+
+        const Entry = struct {
+            comment: ?[]const u8,
+            proto: Proto,
+            /// list of the <param>
+            params: []const Param,
+            /// the value of the 'name' attribute of the '<alias>' element.
+            /// no documentation specifies, but I presume there should only ever be one of these at a time.
+            alias: ?[]const u8,
+            /// the value of the 'name' attribute of the '<vecequiv>' element.
+            /// no documentation specifies, but I presume there should only ever be one of these at a time.
+            vecequiv: ?[]const u8,
+            /// the '<glx>' element.
+            /// no documentation specifies, but I presume there should only ever be one of these at a time.
+            glx: ?GlxInfo,
+
+            pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
+                allocator.free(self.comment orelse "");
+                self.proto.deinit(allocator);
+
+                for (self.params) |param| param.deinit(allocator);
+                allocator.free(self.params);
+
+                allocator.free(self.alias orelse "");
+                allocator.free(self.vecequiv orelse "");
+                if (self.glx) |glx| glx.deinit(allocator);
+            }
+
+            const Proto = struct {
+                group: ?[]const u8,
+                name_index: usize,
+                def: []const Component,
+
+                pub fn deinit(self: Proto, allocator: std.mem.Allocator) void {
+                    allocator.free(self.group orelse "");
+
+                    for (self.def) |component| component.deinit(allocator);
+                    allocator.free(self.def);
+                }
+
+                const Component = struct {
+                    /// true if the text is enclosed in a '<ptype>' element.
+                    is_ptype: bool,
+                    text: []const u8,
+
+                    pub fn deinit(self: Component, allocator: std.mem.Allocator) void {
+                        allocator.free(self.text);
+                    }
+                };
+            };
+            const Param = struct {
+                group: ?[]const u8,
+                len: ?[]const u8,
+                class: ?[]const u8,
+
+                name_index: usize,
+                def: []const Component,
+
+                pub fn deinit(self: Param, allocator: std.mem.Allocator) void {
+                    allocator.free(self.group orelse "");
+                    allocator.free(self.len orelse "");
+                    allocator.free(self.class orelse "");
+                    for (self.def) |component| component.deinit(allocator);
+                    allocator.free(self.def);
+                }
+
+                const Component = struct {
+                    /// true if the text is enclosed in a '<ptype>' element.
+                    is_ptype: bool,
+                    text: []const u8,
+
+                    pub fn deinit(self: Component, allocator: std.mem.Allocator) void {
+                        allocator.free(self.text);
+                    }
+                };
+            };
+            const GlxInfo = struct {
+                //! The readme.pdf that lives with the official gl.xml doesn't seem to describe the '<glx>' tag
+                //! directly, but every discoverable example of it I've seen has exactly these attributes.
+                type: []const u8,
+                opcode: []const u8,
+
+                pub fn deinit(self: GlxInfo, allocator: std.mem.Allocator) void {
+                    allocator.free(self.type);
+                    allocator.free(self.opcode);
+                }
+            };
+        };
+    };
+
+    const FeatureSetGroup = struct {
+        api: gl_targets.Api,
+        name: gl_targets.Version,
+        number: Number,
+        protect: ?[]const u8,
+        comment: ?[]const u8,
+        require_sets: []const FeatureSet,
+        remove_sets: []const FeatureSet,
+
+        pub fn deinit(self: FeatureSetGroup, allocator: std.mem.Allocator) void {
+            allocator.free(self.protect orelse "");
+            allocator.free(self.comment orelse "");
+
+            for (self.require_sets) |set| set.deinit(allocator);
+            allocator.free(self.require_sets);
+
+            for (self.remove_sets) |set| set.deinit(allocator);
+            allocator.free(self.remove_sets);
+        }
+
+        const FeatureSet = struct {
+            profile: ?gl_targets.Profile,
+            comment: ?[]const u8,
+
+            commands: []const Command,
+            enums: []const Enum,
+            types: []const Type,
+
+            pub fn deinit(self: FeatureSet, allocator: std.mem.Allocator) void {
+                allocator.free(self.comment orelse "");
+
+                for (self.commands) |command| command.deinit(allocator);
+                allocator.free(self.commands);
+
+                for (self.enums) |@"enum"| @"enum".deinit(allocator);
+                allocator.free(self.enums);
+
+                for (self.types) |@"type"| @"type".deinit(allocator);
+                allocator.free(self.types);
+            }
+
+            const Command = struct {
+                name: []const u8,
+                comment: ?[]const u8,
+
+                pub fn deinit(self: Command, allocator: std.mem.Allocator) void {
+                    allocator.free(self.name);
+                    allocator.free(self.comment orelse "");
+                }
+            };
+            const Enum = struct {
+                name: []const u8,
+                comment: ?[]const u8,
+
+                pub fn deinit(self: Enum, allocator: std.mem.Allocator) void {
+                    allocator.free(self.name);
+                    allocator.free(self.comment orelse "");
+                }
+            };
+            const Type = struct {
+                name: []const u8,
+                comment: ?[]const u8,
+
+                pub fn deinit(self: Type, allocator: std.mem.Allocator) void {
+                    allocator.free(self.name);
+                    allocator.free(self.comment orelse "");
+                }
+            };
+        };
+
+        const Number = struct {
+            major: u32,
+            minor: u32,
+
+            pub fn parse(src: []const u8) error{
+                NumberMissingSeparator,
+                TooManySeparators,
+                MajorOverflow,
+                MajorInvalidCharacter,
+                MinorOverflow,
+                MinorInvalidCharacter,
+            }!Number {
+                const sep_index = std.mem.indexOfScalar(u8, src, '.') orelse return error.NumberMissingSeparator;
+                if (std.mem.lastIndexOfScalar(u8, src, '.').? != sep_index) return error.TooManySeparators;
+
+                const major_str = src[0..sep_index];
+                const minor_str = src[sep_index + 1 ..];
+
+                return Number{
+                    .major = std.fmt.parseUnsigned(u32, major_str, 10) catch |err| return switch (err) {
+                        inline else => |e| comptime @field(anyerror, "Major" ++ @errorName(e)),
+                    },
+                    .minor = std.fmt.parseUnsigned(u32, minor_str, 10) catch |err| return switch (err) {
+                        inline else => |e| comptime @field(anyerror, "Minor" ++ @errorName(e)),
+                    },
+                };
+            }
+        };
+    };
+
+    const Extension = struct {
+        name: []const u8,
+        supported: []const u8,
+        protect: ?[]const u8,
+        comment: ?[]const u8,
+
+        require_sets: []const FeatureSet,
+        /// The readme.pdf next to gl.xml states:
+        /// > A <remove> block defines a set of interfaces removed by a <feature> (this is primarily
+        /// > useful for the OpenGL core profile, which removed many interfaces - extensions should
+        /// > never remove interfaces, although this usage is allowed by the schema).
+        remove_sets: []const FeatureSet,
+
+        pub fn deinit(self: Extension, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
+            allocator.free(self.supported);
+            allocator.free(self.protect orelse "");
+            allocator.free(self.comment orelse "");
+
+            for (self.require_sets) |set| set.deinit(allocator);
+            allocator.free(self.require_sets);
+
+            for (self.remove_sets) |set| set.deinit(allocator);
+            allocator.free(self.remove_sets);
+        }
+
+        const FeatureSet = struct {
+            profile: ?gl_targets.Profile,
+            comment: ?[]const u8,
+            /// The readme.pdf next to gl.xml states:
+            /// > The api attribute is only supported inside <extension> tags, since <feature>
+            /// > tags already define a specific API.
+            /// This is one of the reasons this is defined as a separate type to `FeatureSetGroup.FeatureSet`.
+            api: ?gl_targets.Api,
+
+            commands: []const Command,
+            enums: []const Enum,
+            types: []const Type,
+
+            pub fn deinit(self: FeatureSet, allocator: std.mem.Allocator) void {
+                allocator.free(self.comment orelse "");
+
+                for (self.commands) |command| command.deinit(allocator);
+                allocator.free(self.commands);
+
+                for (self.enums) |@"enum"| @"enum".deinit(allocator);
+                allocator.free(self.enums);
+
+                for (self.types) |@"type"| @"type".deinit(allocator);
+                allocator.free(self.types);
+            }
+
+            const Command = FeatureSetGroup.FeatureSet.Command;
+            const Enum = FeatureSetGroup.FeatureSet.Enum;
+            const Type = FeatureSetGroup.FeatureSet.Type;
+        };
+    };
+};
+
 const GenerationArgs = struct {
-    output_file: std.fs.File,
-    gl_xml_file: std.fs.File,
+    output_file_path: []const u8,
+    gl_xml_file_path: []const u8,
     api_version: gl_targets.Version,
     api_profile: gl_targets.Profile,
     extensions: []const []const u8,
@@ -611,22 +1013,24 @@ const GenerationArgs = struct {
     fn deinit(args: GenerationArgs, allocator: std.mem.Allocator) void {
         for (args.extensions) |ext| allocator.free(ext);
         allocator.free(args.extensions);
-        args.output_file.close();
-        args.gl_xml_file.close();
+        allocator.free(args.output_file_path);
+        allocator.free(args.gl_xml_file_path);
     }
 
     fn parse(
         allocator: std.mem.Allocator,
         args_iter: *std.process.ArgIterator,
-        stderr: anytype,
+        comptime log_scope: @TypeOf(.enum_literal),
     ) !GenerationArgs {
+        const log = std.log.scoped(log_scope);
+
         if (!args_iter.skip()) @panic("Tried to skip argv[0] (executable path), but argv is empty.\n");
 
         var output_file_path: ?[]u8 = null;
-        defer allocator.free(output_file_path orelse "");
+        errdefer allocator.free(output_file_path orelse "");
 
         var gl_xml_file_path: ?[]u8 = null;
-        defer allocator.free(gl_xml_file_path orelse "");
+        errdefer allocator.free(gl_xml_file_path orelse "");
 
         var api_version: ?gl_targets.Version = null;
         var api_profile: ?gl_targets.Profile = null;
@@ -646,24 +1050,30 @@ const GenerationArgs = struct {
                 if (std.mem.eql(u8, arg_start, "--")) break;
 
                 if (!std.mem.startsWith(u8, arg_start, "--")) {
-                    try stderr.print("Expected argument name to be preceeded by '--'.\n", .{});
+                    log.err("Expected argument name to be preceeded by '--'.\n", .{});
                     continue;
                 }
                 const tag = std.meta.stringToEnum(ArgName, arg_start["--".len..]) orelse {
-                    try stderr.print("Unrecognised argument name '{s}'. Valid argument names are:\n", .{arg_start["--".len..]});
-                    inline for (@typeInfo(ArgName).Enum.fields) |field| try stderr.print("  \"{s}\",\n", .{field.name});
-                    continue;
+                    log.warn("Unrecognised argument name '{s}'. Valid argument names are:\n{s}\n", .{
+                        arg_start["--".len..],
+                        util.fmtMultiLineList(std.meta.fieldNames(ArgName), .{
+                            .indent = &[_]u8{' '} ** 2,
+                            .element_prefix = "\"",
+                            .element_suffix = "\",",
+                        }),
+                    });
+                    return error.UnrecognisedArgumentName;
                 };
 
                 break :blk tag;
             };
             const arg_val: []const u8 = if (args_iter.next()) |arg_val| std.mem.trim(u8, arg_val, &whitespace_chars) else {
-                try stderr.writeAll("Expected argument key value pairs of the form '--<name> <value>'.\n");
+                log.err("Expected argument key value pairs of the form '--<name> <value>'.\n", .{});
                 break;
             };
 
             if (present.contains(arg_name))
-                try stderr.print("Specified '{s}' more than once.\n", .{@tagName(arg_name)});
+                log.warn("Specified '{s}' more than once.\n", .{@tagName(arg_name)});
             present.setPresent(arg_name, true);
 
             switch (arg_name) {
@@ -676,18 +1086,23 @@ const GenerationArgs = struct {
                     std.mem.copy(u8, gl_xml_file_path.?, arg_val);
                 },
                 .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val) orelse {
-                    try stderr.writeAll(comptime err_msg: {
-                        var err_str: []const u8 = "Expected api-version to be the target OpenGL API version. Should be one of:\n";
-                        for (@typeInfo(gl_targets.Version).Enum.fields) |field| err_str = err_str ++ "  " ++ field.name ++ ",\n";
-                        break :err_msg err_str;
+                    log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}\n", .{
+                        util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Version), .{
+                            .indent = &[_]u8{' '} ** 2,
+                            .element_prefix = "\"",
+                            .element_suffix = "\",",
+                        }),
                     });
+
                     return error.UnrecognisedApiVersion;
                 },
                 .@"api-profile" => api_profile = std.meta.stringToEnum(gl_targets.Profile, arg_val) orelse {
-                    try stderr.writeAll(comptime err_msg: {
-                        var err_str: []const u8 = "Expected api-profile to be the target OpenGL API version. Should be one of:\n";
-                        for (@typeInfo(gl_targets.Version).Enum.fields) |field| err_str = err_str ++ "  " ++ field.name ++ ",\n";
-                        break :err_msg err_str;
+                    log.err("Expected api-profile to be the target OpenGL API version. Should be one of:\n{s}\n", .{
+                        util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Profile), .{
+                            .indent = &[_]u8{' '} ** 2,
+                            .element_prefix = "\"",
+                            .element_suffix = "\",",
+                        }),
                     });
                     return error.UnrecognisedApiProfile;
                 },
@@ -698,21 +1113,21 @@ const GenerationArgs = struct {
             const missing = present.complement();
             var missing_iter = missing.iterator();
             while (missing_iter.next()) |missing_tag|
-                try stderr.print("Missing argument '{s}'.\n", .{@tagName(missing_tag)});
+                log.err("Missing argument '{s}'.\n", .{@tagName(missing_tag)});
             if (missing.count() != 0) return error.MissingArguments;
         }
 
-        const output_file = std.fs.cwd().createFile(output_file_path.?, .{}) catch |err| {
-            try stderr.print("Failed to create/open output file '{s}'.\n", .{output_file_path.?});
-            return err;
-        };
-        errdefer output_file.close();
+        // const output_file = std.fs.cwd().createFile(output_file_path.?, .{}) catch |err| {
+        //     log.err("Failed to create/open output file '{s}'.\n", .{output_file_path.?});
+        //     return err;
+        // };
+        // errdefer output_file.close();
 
-        const gl_xml_file = std.fs.cwd().openFile(gl_xml_file_path.?, .{}) catch |err| {
-            try stderr.print("Failed to open registry file '{s}'.\n", .{gl_xml_file_path.?});
-            return err;
-        };
-        errdefer gl_xml_file.close();
+        // const gl_xml_file = std.fs.cwd().openFile(gl_xml_file_path.?, .{}) catch |err| {
+        //     log.err("Failed to open registry file '{s}'.\n", .{gl_xml_file_path.?});
+        //     return err;
+        // };
+        // errdefer gl_xml_file.close();
 
         const extensions: []const []const u8 = blk: {
             var extensions = std.ArrayList([]const u8).init(allocator);
@@ -733,8 +1148,8 @@ const GenerationArgs = struct {
         }
 
         return GenerationArgs{
-            .output_file = output_file,
-            .gl_xml_file = gl_xml_file,
+            .output_file_path = output_file_path.?,
+            .gl_xml_file_path = gl_xml_file_path.?,
             .api_version = api_version.?,
             .api_profile = api_profile.?,
             .extensions = extensions,

@@ -120,7 +120,7 @@ pub const Element = struct {
     pub fn getLastChildElementIndexPos(elem: Element, name: []const u8, limit_pos: usize) ?usize {
         assert(limit_pos <= elem.children.len);
         assert(limit_pos > 0);
-        var iter = std.mem.reverseIterator(elem.children[0 .. limit_pos - 1]);
+        var iter = std.mem.reverseIterator(elem.children[0..limit_pos]);
         var i: usize = limit_pos - 1;
         while (iter.next()) |child| : (i -= 1) {
             const child_elem_name: []const u8 = switch (child) {
@@ -252,6 +252,9 @@ pub fn parse(
         discard_comments: bool = true,
         /// Discard any text that is only comprised of whitespace
         discard_whitespace: bool = true,
+
+        /// Transform entity references to their textual equivalent, e.g. "&amp;" -> "&"
+        transform_entity_refs: bool = true,
     },
 ) !Tree {
     var lct_reader = util.lineColumnTrackingReader(xml_reader);
@@ -287,6 +290,9 @@ pub fn parse(
 
     var content_buf = try std.ArrayList(u8).initCapacity(child_allocator, 128);
     defer content_buf.deinit();
+
+    var entity_ref_buf = try std.ArrayList(u8).initCapacity(child_allocator, "&apos;".len);
+    defer entity_ref_buf.deinit();
 
     if (!try reader.isBytes(
         \\<?xml version="1.0" encoding="UTF-8"?>
@@ -556,6 +562,77 @@ pub fn parse(
                             state = .left_angle_bracket;
                             continue :mainloop;
                         },
+                        '&' => {
+                            assert(entity_ref_buf.items.len == 0);
+                            cdata_cp = try ((try util.readCodepointUtf8(reader)) orelse error.EndOfStream);
+                            while (true) : (cdata_cp = try ((try util.readCodepointUtf8(reader)) orelse error.EndOfStream)) {
+                                if (cdata_cp == ';') break;
+                                if (cdata_cp != '#' and !isXmlNameChar(cdata_cp)) {
+                                    return error.InvalidEntityReference;
+                                }
+                                _ = try util.writeCodepointUtf8(entity_ref_buf.writer(), cdata_cp);
+                            }
+
+                            if (entity_ref_buf.items.len == 0) {
+                                return error.InvalidEmptyEntityRefName;
+                            }
+                            const entity_ref_cp: u21 = switch (entity_ref_buf.items[0]) {
+                                ';' => return error.InvalidEmptyEntityRefName,
+                                '#' => blk: {
+                                    if (entity_ref_buf.items.len == 1)
+                                        return error.MissingCharacterRefDigits;
+                                    if (entity_ref_buf.items[1] == 'x') {
+                                        const digits = entity_ref_buf.items[2..];
+                                        if (digits.len == 2)
+                                            return error.MissingCharacterRefHexDigits;
+                                        break :blk std.fmt.parseUnsigned(u21, digits, 16) catch |err| return switch (err) {
+                                            error.Overflow => error.InvalidCharacterRefValue,
+                                            error.InvalidCharacter => error.InvalidCharacterRef,
+                                        };
+                                    }
+                                    const digits = entity_ref_buf.items[1..];
+                                    break :blk std.fmt.parseUnsigned(u21, digits, 10) catch |err| return switch (err) {
+                                        error.Overflow => error.InvalidCharacterRefValue,
+                                        error.InvalidCharacter => error.InvalidCharacterRef,
+                                    };
+                                },
+                                else => blk: {
+                                    var utf_8_view = std.unicode.Utf8View.init(entity_ref_buf.items) catch |err| return switch (err) {
+                                        error.InvalidUtf8 => error.InvalidEntityRef,
+                                    };
+                                    var cp_iter = utf_8_view.iterator();
+                                    if (!isXmlNameStartChar(cp_iter.nextCodepoint().?))
+                                        return error.InvalidEntityRefNameStartChar;
+                                    while (cp_iter.nextCodepoint()) |name_cp| {
+                                        if (!isXmlNameChar(name_cp))
+                                            return error.InvalidEntityRefNameChar;
+                                    }
+
+                                    if (std.meta.stringToEnum(enum { quot, amp, apos, lt, gt }, entity_ref_buf.items)) |predefined_tag| {
+                                        break :blk switch (predefined_tag) {
+                                            .quot => '\u{22}',
+                                            .amp => '\u{26}',
+                                            .apos => '\u{27}',
+                                            .lt => '\u{3C}',
+                                            .gt => '\u{3E}',
+                                        };
+                                    }
+                                    @panic("TODO: Handle non-predefined entity references."); // I hate XML
+                                },
+                            };
+
+                            if (!args.transform_entity_refs) {
+                                try content_buf.append('&');
+                                try content_buf.appendSlice(entity_ref_buf.items);
+                                try content_buf.append(';');
+                                entity_ref_buf.shrinkRetainingCapacity(0);
+                                continue;
+                            }
+
+                            _ = try util.writeCodepointUtf8(content_buf.writer(), entity_ref_cp);
+                            entity_ref_buf.shrinkRetainingCapacity(0);
+                            continue;
+                        },
                         else => {
                             non_whitespace = non_whitespace or !isXmlWhiteSpaceChar(cdata_cp);
                             _ = try util.writeCodepointUtf8(content_buf.writer(), cdata_cp);
@@ -620,6 +697,19 @@ fn isXmlNameChar(cp: u21) bool {
         '\u{B7}',
         '\u{0300}'...'\u{036F}',
         '\u{203F}'...'\u{2040}',
+        => true,
+        else => false,
+    };
+}
+
+fn isXmlValidChar(cp: u21) bool {
+    return switch (cp) {
+        '\u{9}',
+        '\u{A}',
+        '\u{D}',
+        '\u{20}'...'\u{D7FF}',
+        '\u{E000}'...'\u{FFFD}',
+        '\u{10000}'...'\u{10FFFF}',
         => true,
         else => false,
     };

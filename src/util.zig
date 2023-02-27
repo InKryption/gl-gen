@@ -91,3 +91,72 @@ pub fn writeCodepointUtf8(writer: anytype, codepoint: u21) @TypeOf(writer).Error
     try writer.writeAll(buf[0..len]);
     return len;
 }
+
+pub fn fmtMultiLineList(
+    list: anytype,
+    args: anytype,
+) FmtMultiLineList(std.meta.Elem(@TypeOf(list))) {
+    var formatter = FmtMultiLineList(std.meta.Elem(@TypeOf(list))){
+        .list = list,
+    };
+    inline for (@typeInfo(@TypeOf(args)).Struct.fields) |field| {
+        comptime assert(!std.mem.eql(u8, field.name, "list"));
+        @field(formatter, field.name) = @field(args, field.name);
+    }
+    return formatter;
+}
+
+pub fn FmtMultiLineList(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        list: []align(1) const T,
+
+        indent_level: u32 = 0,
+        indent_first_elem: bool = true,
+
+        indent_prefix: []const u8 = "",
+        indent: []const u8 = " " ** 4,
+        indent_suffix: []const u8 = "",
+
+        element_prefix: []const u8 = "",
+        element_suffix: []const u8 = ",",
+
+        final_newline: bool = true,
+        newline: []const u8 = "\n",
+
+        pub fn format(
+            self: Self,
+            comptime fmt_str: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) @TypeOf(writer).Error!void {
+            if (self.indent_first_elem) {
+                try self.writeIndent(writer);
+            }
+            for (self.list, 0..) |value, i| {
+                if (i != 0) {
+                    try writer.writeAll(self.newline);
+                    try self.writeIndent(writer);
+                }
+                try writer.writeAll(self.element_prefix);
+                try std.fmt.formatType(
+                    value,
+                    fmt_str,
+                    options,
+                    writer,
+                    std.fmt.default_max_depth,
+                );
+                try writer.writeAll(self.element_suffix);
+            }
+            if (self.final_newline) {
+                try writer.writeAll(self.newline);
+            }
+        }
+
+        fn writeIndent(self: Self, writer: anytype) !void {
+            try writer.writeAll(self.indent_prefix);
+            for (0..self.indent_level) |_| try writer.writeAll(self.indent);
+            try writer.writeAll(self.indent_suffix);
+        }
+    };
+}
