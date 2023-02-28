@@ -45,7 +45,7 @@ pub fn main() !void {
     const registry = try Registry.parse(tree.root, allocator);
     defer registry.deinit(allocator);
 
-    if (false) { // debug print the type decls in a nice format to stderr
+    if (false) { // debug print the type decls
         for (registry.types) |type_entry| {
             std.debug.print(
                 \\ * {s}:
@@ -83,7 +83,7 @@ pub fn main() !void {
         }
     }
 
-    if (false) { // debug print the enum sets in a nice format to stderr
+    if (false) { // debug print the enum sets
         for (registry.enum_sets) |set| {
             std.debug.print(
                 \\ * namespace: {s}
@@ -152,6 +152,52 @@ pub fn main() !void {
                 std.debug.print("\n", .{});
             }
 
+            std.debug.print("\n", .{});
+        }
+    }
+
+    if (false) { // debug print the commands
+        std.debug.print("* Commands (Namespace={s}):\n", .{registry.commands.namespace});
+        for (registry.commands.entries) |cmd| {
+            assert(!cmd.proto.def[cmd.proto.name_index].is_ptype);
+            std.debug.print("   + \"", .{});
+            for (cmd.proto.def, 0..) |component, i| {
+                if (i != 0) std.debug.print(" ", .{});
+                std.debug.print("{s}", .{std.mem.trim(u8, component.text, &[_]u8{ ' ', '\t', '\n', '\r' })});
+            }
+            std.debug.print("\":\n", .{});
+            if (cmd.proto.group) |group| std.debug.print("     - group: {s}\n", .{group});
+
+            if (cmd.comment) |comment| std.debug.print("     - comment: \"{s}\"\n", .{comment});
+            if (cmd.alias) |alias| std.debug.print("     - alias: {s}\n", .{alias});
+            if (cmd.vecequiv) |vecequiv| std.debug.print("     - vecequiv: {s}\n", .{vecequiv});
+
+            std.debug.print("     - params:", .{});
+            if (cmd.params.len == 0)
+                std.debug.print(" (none)\n", .{})
+            else
+                std.debug.print("\n", .{});
+            std.debug.print("", .{});
+            for (cmd.params) |param| {
+                std.debug.print("       º ", .{});
+                for (param.def, 0..) |component, i| {
+                    if (i != 0) std.debug.print(" ", .{});
+                    std.debug.print("{s}", .{std.mem.trim(u8, component.text, &[_]u8{ ' ', '\t', '\n', '\r' })});
+                }
+                if (param.class) |class| std.debug.print(" (class=\"{s}\")", .{class});
+                if (param.group) |group| std.debug.print(" (group=\"{s}\")", .{group});
+                if (param.len) |len| std.debug.print(" (len=\"{s}\")", .{len});
+                std.debug.print("\n", .{});
+            }
+            if (cmd.glx.len != 0) {
+                std.debug.print("     - glx:\n", .{});
+                for (cmd.glx) |info| {
+                    std.debug.print("        º type={s}, opcode={s}", .{ info.type, info.opcode });
+                    if (info.name) |name| std.debug.print(", name=\"{s}\"", .{name});
+                    if (info.comment) |comment| std.debug.print(", comment=\"{s}\"", .{comment});
+                    std.debug.print("\n", .{});
+                }
+            }
             std.debug.print("\n", .{});
         }
     }
@@ -407,6 +453,12 @@ const Registry = struct {
             allocator.free(types);
         }
 
+        const groups_elem: bool = blk: {
+            const first_index = tree.getChildElementIndexPos("groups", 0);
+            if (first_index != null and tree.getChildElementIndexPos("groups", first_index.? + 1) != null) return error.TooManyGroupElements;
+            break :blk first_index != null;
+        };
+
         const enum_sets: []const EnumsSet = enum_sets: {
             var enum_sets = std.ArrayList(EnumsSet).init(allocator);
             defer enum_sets.deinit();
@@ -594,15 +646,346 @@ const Registry = struct {
             allocator.free(enum_sets);
         }
 
+        const commands: Commands = cmds: {
+            const commands_elem_index = tree.getChildElementIndexPos("commands", 0) orelse {
+                return error.MissingCommandsElement;
+            };
+            if (tree.getChildElementIndexPos("commands", commands_elem_index + 1) != null)
+                return error.TooManyCommandsElements;
+            const commands_elem: xml.Element = tree.children[commands_elem_index].element;
+
+            const namespace: []const u8 = if (commands_elem.getAttributeValue("namespace")) |str|
+                try allocator.dupe(u8, str)
+            else {
+                return error.CommandsElementMissingNamespaceAttribute;
+            };
+            errdefer allocator.free(namespace);
+
+            var entries_list = std.ArrayList(Commands.Entry).init(allocator);
+            defer entries_list.deinit();
+            errdefer for (entries_list.items) |entry| entry.deinit(allocator);
+
+            for (commands_elem.children) |commands_child| {
+                const command_elem: xml.Element = switch (commands_child) {
+                    .element => |elem| elem,
+                    .comment => continue,
+                    .text => return error.UnexpectedTextInCommandsElement,
+                };
+
+                const command_comment: ?[]const u8 = if (command_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(command_comment orelse "");
+
+                const proto_elem_index = for (command_elem.children, 0..) |cmd_elem_child, i| {
+                    switch (cmd_elem_child) {
+                        .comment => continue,
+                        .text => return error.UnexpectedTextInCommandElement,
+                        .element => |elem| {
+                            if (std.mem.eql(u8, elem.name, "proto")) break i;
+                            return error.FirstElementOfCommandIsNotProto;
+                        },
+                    }
+                } else return error.CommandHasNoProto;
+                const proto_elem: xml.Element = command_elem.children[proto_elem_index].element;
+
+                var params_list = std.ArrayList(Commands.Entry.Param).init(allocator);
+                defer params_list.deinit();
+                errdefer for (params_list.items) |param| param.deinit(allocator);
+
+                const proto: Commands.Entry.Proto = proto: {
+                    const proto_group: ?[]const u8 = if (proto_elem.getAttributeValue("")) |str| try allocator.dupe(u8, str) else null;
+                    errdefer allocator.free(proto_group orelse "");
+
+                    var proto_component_list = std.ArrayList(Commands.Entry.Proto.Component).init(allocator);
+                    defer proto_component_list.deinit();
+                    errdefer for (proto_component_list.items) |component| component.deinit(allocator);
+
+                    var proto_name_index: ?usize = null;
+                    for (proto_elem.children) |proto_child| {
+                        switch (proto_child) {
+                            .comment => continue,
+                            .text => |text| {
+                                const duped_text = try allocator.dupe(u8, text);
+                                errdefer allocator.free(duped_text);
+
+                                try proto_component_list.append(.{
+                                    .is_ptype = false,
+                                    .text = duped_text,
+                                });
+                            },
+                            .element => |elem| {
+                                const elem_tag = std.meta.stringToEnum(enum { ptype, name }, elem.name) orelse {
+                                    return error.ProtoUnrecognizedElement;
+                                };
+                                switch (elem_tag) {
+                                    .ptype => {
+                                        if (elem.attributes.len != 0)
+                                            return error.ProtoPTypeElementHasAttributes;
+                                        if (elem.children.len == 0)
+                                            return error.ProtoPTypeElementIsEmpty;
+                                        if (elem.children.len != 1)
+                                            return error.ProtoPTypeElementHasTooManyChildren;
+                                        if (elem.children[0] != .text)
+                                            return error.ProtoPTypeElementMissingText;
+                                    },
+                                    .name => {
+                                        if (proto_name_index != null)
+                                            return error.ProtoHasTooManyNames;
+                                        proto_name_index = proto_component_list.items.len;
+
+                                        if (elem.attributes.len != 0)
+                                            return error.ProtoNameElementHasAttributes;
+                                        if (elem.children.len == 0)
+                                            return error.ProtoNameElementIsEmpty;
+                                        if (elem.children.len != 1)
+                                            return error.ProtoNameElementHasTooManyChildren;
+                                        if (elem.children[0] != .text)
+                                            return error.ProtoNameElementMissingText;
+                                    },
+                                }
+
+                                const text = try allocator.dupe(u8, elem.children[0].text);
+                                errdefer allocator.free(text);
+
+                                try proto_component_list.append(.{
+                                    .is_ptype = elem_tag == .ptype,
+                                    .text = text,
+                                });
+                            },
+                        }
+                    }
+
+                    const proto_def = try proto_component_list.toOwnedSlice();
+                    errdefer allocator.free(proto_def);
+                    errdefer for (proto_def) |component| component.deinit(allocator);
+
+                    break :proto Commands.Entry.Proto{
+                        .group = proto_group,
+                        .name_index = try (proto_name_index orelse error.CommandProtoMissingName),
+                        .def = proto_def,
+                    };
+                };
+
+                const maybe_first_non_param_index: ?usize = for (command_elem.children[proto_elem_index + 1 ..], proto_elem_index + 1..) |cmd_elem_child, i| {
+                    const param_elem: xml.Element = switch (cmd_elem_child) {
+                        .comment => continue,
+                        .text => return error.UnexpectedTextInCommandElement,
+                        .element => |elem| blk: {
+                            if (!std.mem.eql(u8, elem.name, "param")) break i;
+                            break :blk elem;
+                        },
+                    };
+
+                    const param_group: ?[]const u8 = if (param_elem.getAttributeValue("group")) |str| try allocator.dupe(u8, str) else null;
+                    errdefer allocator.free(param_group orelse "");
+
+                    const param_len: ?[]const u8 = if (param_elem.getAttributeValue("len")) |str| try allocator.dupe(u8, str) else null;
+                    errdefer allocator.free(param_len orelse "");
+
+                    const param_class: ?[]const u8 = if (param_elem.getAttributeValue("class")) |str| try allocator.dupe(u8, str) else null;
+                    errdefer allocator.free(param_class orelse "");
+
+                    var param_component_list = std.ArrayList(Commands.Entry.Param.Component).init(allocator);
+                    defer param_component_list.deinit();
+                    errdefer for (param_component_list.items) |component| component.deinit(allocator);
+
+                    var param_name_index: ?usize = null;
+                    for (param_elem.children) |param_child| {
+                        switch (param_child) {
+                            .comment => continue,
+                            .text => |text| {
+                                const duped_text = try allocator.dupe(u8, text);
+                                errdefer allocator.free(duped_text);
+
+                                try param_component_list.append(.{
+                                    .is_ptype = false,
+                                    .text = duped_text,
+                                });
+                            },
+                            .element => |elem| {
+                                const elem_tag = std.meta.stringToEnum(enum { ptype, name }, elem.name) orelse {
+                                    return error.ParamUnrecognizedElement;
+                                };
+                                switch (elem_tag) {
+                                    .ptype => {
+                                        if (elem.attributes.len != 0)
+                                            return error.ParamPTypeElementHasAttributes;
+                                        if (elem.children.len == 0)
+                                            return error.ParamPTypeElementIsEmpty;
+                                        if (elem.children.len != 1)
+                                            return error.ParamPTypeElementHasTooManyChildren;
+                                        if (elem.children[0] != .text)
+                                            return error.ParamPTypeElementMissingText;
+                                    },
+                                    .name => {
+                                        if (param_name_index != null)
+                                            return error.ParamHasTooManyNames;
+                                        param_name_index = param_component_list.items.len;
+
+                                        if (elem.attributes.len != 0)
+                                            return error.ParamNameElementHasAttributes;
+                                        if (elem.children.len == 0)
+                                            return error.ParamNameElementIsEmpty;
+                                        if (elem.children.len != 1)
+                                            return error.ParamNameElementHasTooManyChildren;
+                                        if (elem.children[0] != .text)
+                                            return error.ParamNameElementMissingText;
+                                    },
+                                }
+
+                                const text = try allocator.dupe(u8, elem.children[0].text);
+                                errdefer allocator.free(text);
+
+                                try param_component_list.append(.{
+                                    .is_ptype = elem_tag == .ptype,
+                                    .text = text,
+                                });
+                            },
+                        }
+                    }
+
+                    const param_def: []const Commands.Entry.Param.Component = try param_component_list.toOwnedSlice();
+                    errdefer allocator.free(param_def);
+                    errdefer for (param_def) |component| component.deinit(allocator);
+
+                    try params_list.append(Commands.Entry.Param{
+                        .group = param_group,
+                        .len = param_len,
+                        .class = param_class,
+
+                        .name_index = try (param_name_index orelse error.ParamMissingName),
+                        .def = param_def,
+                    });
+                } else null;
+
+                const params: []const Commands.Entry.Param = try params_list.toOwnedSlice();
+                errdefer allocator.free(params);
+                errdefer for (params) |param| param.deinit(allocator);
+
+                var alias: ?[]const u8 = null;
+                errdefer allocator.free(alias orelse "");
+
+                var vecequiv: ?[]const u8 = null;
+                errdefer allocator.free(vecequiv orelse "");
+
+                var glx_list = std.ArrayList(Commands.Entry.GlxInfo).init(allocator);
+                defer glx_list.deinit();
+                errdefer for (glx_list.items) |info| info.deinit(allocator);
+
+                if (maybe_first_non_param_index) |first_non_param_index| {
+                    for (command_elem.children[first_non_param_index..], 0..) |child, i| {
+                        const child_elem: xml.Element = switch (child) {
+                            .comment => continue,
+                            .element => |elem| elem,
+                            .text => return error.UnexpectedTextInCommandElement,
+                        };
+                        const child_elem_name_tag = std.meta.stringToEnum(enum { param, alias, vecequiv, glx }, child_elem.name) orelse {
+                            return error.UnrecognizedElementNameInCommand;
+                        };
+                        switch (child_elem_name_tag) {
+                            .param => {
+                                assert(i != 0);
+                                // some elements are between two param elements (e.g. <param>...</param><glx .../><param>...</param>)
+                                return error.NonParamElementInCommandParamList;
+                            },
+                            inline .alias, .vecequiv => |tag| {
+                                const var_ptr: *?[]const u8 = switch (comptime tag) {
+                                    .alias => &alias,
+                                    .vecequiv => &vecequiv,
+                                    else => comptime unreachable,
+                                };
+
+                                if (var_ptr.* != null) return comptime switch (tag) {
+                                    .alias => error.CommandHasTooManyAliases,
+                                    .vecequiv => error.CommandHasTooManyVecEquivs,
+                                    else => unreachable,
+                                };
+                                const name_attr: []const u8 = child_elem.getAttributeValue("name") orelse {
+                                    return comptime switch (tag) {
+                                        .alias => error.CommandAliasMissingNameAttribute,
+                                        .vecequiv => error.CommandVecEquivMissingNameAttribute,
+                                        else => unreachable,
+                                    };
+                                };
+
+                                if (child_elem.attributes.len != 1) return comptime switch (tag) {
+                                    .alias => error.CommandAliasHasTooManyAttributes,
+                                    .vecequiv => error.CommandVecEquivHasTooManyAttributes,
+                                    else => unreachable,
+                                };
+                                if (child_elem.children.len != 0) return comptime switch (tag) {
+                                    .alias => error.CommandAliasIsNotEmpty,
+                                    .vecequiv => error.CommandVecEquivIsNotEmpty,
+                                    else => unreachable,
+                                };
+                                var_ptr.* = try allocator.dupe(u8, name_attr);
+                            },
+                            .glx => {
+                                if (child_elem.children.len != 0)
+                                    return error.CommandGlxIsNotEmpty;
+
+                                const type_attr = if (child_elem.getAttributeValue("type")) |str|
+                                    try allocator.dupe(u8, str)
+                                else {
+                                    return error.CommandGlxMissingTypeAttribute;
+                                };
+                                errdefer allocator.free(type_attr);
+
+                                const opcode_attr = if (child_elem.getAttributeValue("opcode")) |str|
+                                    try allocator.dupe(u8, str)
+                                else {
+                                    return error.CommandGlxMissingOpcodeAttribute;
+                                };
+                                errdefer allocator.free(opcode_attr);
+
+                                const name_attr: ?[]const u8 = if (child_elem.getAttributeValue("name")) |str| try allocator.dupe(u8, str) else null;
+                                errdefer allocator.free(name_attr orelse "");
+
+                                const comment_attr: ?[]const u8 = if (child_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                                errdefer allocator.free(comment_attr orelse "");
+
+                                try glx_list.append(Commands.Entry.GlxInfo{
+                                    .type = type_attr,
+                                    .opcode = opcode_attr,
+
+                                    .name = name_attr,
+                                    .comment = comment_attr,
+                                });
+                            },
+                        }
+                    }
+                }
+
+                const glx: []const Commands.Entry.GlxInfo = try glx_list.toOwnedSlice();
+                errdefer allocator.free(glx);
+                errdefer for (glx) |info| info.deinit(allocator);
+
+                try entries_list.append(Commands.Entry{
+                    .comment = command_comment,
+                    .proto = proto,
+                    .params = params,
+                    .alias = alias,
+                    .vecequiv = vecequiv,
+                    .glx = glx,
+                });
+            }
+
+            const entries: []const Commands.Entry = try entries_list.toOwnedSlice();
+            errdefer allocator.free(entries);
+            errdefer for (entries) |entry| entry.deinit(allocator);
+
+            break :cmds Commands{
+                .namespace = namespace,
+                .entries = entries,
+            };
+        };
+        errdefer commands.deinit(allocator);
+
         return std.mem.zeroInit(Registry, .{
             .comment = top_level_comment,
             .types = types,
-            .groups_elem = blk: {
-                const first_index = tree.getChildElementIndexPos("groups", 0);
-                if (first_index != null and tree.getChildElementIndexPos("groups", first_index.? + 1) != null) return error.TooManyGroupElements;
-                break :blk first_index != null;
-            },
+            .groups_elem = groups_elem,
             .enum_sets = enum_sets,
+            .commands = commands,
         });
         // return Registry{
         //     .comment = top_level_comment,
@@ -766,9 +1149,8 @@ const Registry = struct {
             /// the value of the 'name' attribute of the '<vecequiv>' element.
             /// no documentation specifies, but I presume there should only ever be one of these at a time.
             vecequiv: ?[]const u8,
-            /// the '<glx>' element.
-            /// no documentation specifies, but I presume there should only ever be one of these at a time.
-            glx: ?GlxInfo,
+            /// the '<glx>' elements.
+            glx: []const GlxInfo,
 
             pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
                 allocator.free(self.comment orelse "");
@@ -779,7 +1161,7 @@ const Registry = struct {
 
                 allocator.free(self.alias orelse "");
                 allocator.free(self.vecequiv orelse "");
-                if (self.glx) |glx| glx.deinit(allocator);
+                for (self.glx) |info| info.deinit(allocator);
             }
 
             const Proto = struct {
@@ -835,6 +1217,9 @@ const Registry = struct {
                 //! directly, but every discoverable example of it I've seen has exactly these attributes.
                 type: []const u8,
                 opcode: []const u8,
+
+                name: ?[]const u8,
+                comment: ?[]const u8,
 
                 pub fn deinit(self: GlxInfo, allocator: std.mem.Allocator) void {
                     allocator.free(self.type);
@@ -1116,18 +1501,6 @@ const GenerationArgs = struct {
                 log.err("Missing argument '{s}'.\n", .{@tagName(missing_tag)});
             if (missing.count() != 0) return error.MissingArguments;
         }
-
-        // const output_file = std.fs.cwd().createFile(output_file_path.?, .{}) catch |err| {
-        //     log.err("Failed to create/open output file '{s}'.\n", .{output_file_path.?});
-        //     return err;
-        // };
-        // errdefer output_file.close();
-
-        // const gl_xml_file = std.fs.cwd().openFile(gl_xml_file_path.?, .{}) catch |err| {
-        //     log.err("Failed to open registry file '{s}'.\n", .{gl_xml_file_path.?});
-        //     return err;
-        // };
-        // errdefer gl_xml_file.close();
 
         const extensions: []const []const u8 = blk: {
             var extensions = std.ArrayList([]const u8).init(allocator);
