@@ -19,30 +19,35 @@ pub fn main() !void {
     const api_version: gl_targets.Version = args.api_version;
     const api_profile: gl_targets.Profile = args.api_profile;
 
-    const tree: xml.Tree = tree: {
-        const gl_xml_file = try std.fs.cwd().openFile(args.gl_xml_file_path, .{});
-        defer gl_xml_file.close();
+    const registry: Registry = reg: {
+        const tree: xml.Tree = tree: {
+            const gl_xml_file = try std.fs.cwd().openFile(args.gl_xml_file_path, .{});
+            defer gl_xml_file.close();
 
-        var buffered_gl_xml = std.io.bufferedReaderSize(32_768, gl_xml_file.reader());
-        const gl_xml_reader = buffered_gl_xml.reader();
+            var buffered_gl_xml = std.io.bufferedReaderSize(32_768, gl_xml_file.reader());
+            const gl_xml_reader = buffered_gl_xml.reader();
 
-        var error_line: u64 = undefined;
-        var error_column: u64 = undefined;
+            var error_line: u64 = undefined;
+            var error_column: u64 = undefined;
 
-        break :tree xml.parse(allocator, gl_xml_reader, .{
-            .line = &error_line,
-            .column = &error_column,
-            .discard_comments = true,
-            .discard_whitespace = true,
-            .transform_entity_refs = true,
-        }) catch |err| {
-            log.err("Parsing error encountered at {d}:{d} (line:column) of the registry.\n", .{ error_line + 1, error_column + 1 });
-            return err;
+            break :tree xml.parse(allocator, gl_xml_reader, .{
+                .line = &error_line,
+                .column = &error_column,
+                .discard_comments = true,
+                .discard_whitespace = true,
+                .transform_entity_refs = true,
+            }) catch |err| {
+                log.err("Parsing error encountered at {d}:{d} (line:column) of the registry.\n", .{ error_line + 1, error_column + 1 });
+                return err;
+            };
         };
-    };
-    defer tree.deinit(allocator);
+        defer tree.deinit(allocator);
 
-    const registry = try Registry.parse(tree.root, allocator);
+        const registry = try Registry.parse(tree.root, allocator);
+        errdefer registry.deinit(allocator);
+
+        break :reg registry;
+    };
     defer registry.deinit(allocator);
 
     if (false) { // debug print the type decls
@@ -208,16 +213,9 @@ pub fn main() !void {
     var out_writer_buffered = std.io.bufferedWriter(output_file.writer());
     const out = out_writer_buffered.writer();
 
-    if (true) return;
-
     var must_flush_out_writer_buffered = true;
     defer assert(!must_flush_out_writer_buffered or out_writer_buffered.end == 0);
     errdefer must_flush_out_writer_buffered = false;
-
-    if (!std.mem.eql(u8, tree.root.name, "registry")) {
-        log.err("Expected root element to be 'registry', found '{s}'.\n", .{tree.root.name});
-        return error.InvalidRootElement;
-    }
 
     // top level doc comment describing generation parameters
     try out.print(
@@ -227,7 +225,7 @@ pub fn main() !void {
         \\//! * Profile: {s}
         \\//! * Extensions: 
     , .{
-        api_version.stringWithGlPrefix(),
+        @tagName(api_version),
         @tagName(api_profile),
     });
 
@@ -241,70 +239,49 @@ pub fn main() !void {
         try out.writeAll("\n");
     }
 
-    { // write the comment element
-        const name = "comment";
-        const elem_index: usize = tree.root.getChildElementIndexPos(name, 0) orelse {
-            log.err("Missing element '{s}'.\n", .{name});
-            return error.MissingCommentElement;
-        };
-        if (tree.root.getChildElementIndexPos(name, elem_index + 1) != null) {
-            log.err("Too many elements with name '{s}'.\n", .{name});
-            return error.TooManyCommentElements;
-        }
-        const element = tree.root.children[elem_index].element;
-
-        if (element.children.len != 1 or element.children[0] != .text) {
-            log.err("Expected only text in {s} element.\n", .{name});
-            return error.TooManyCommentElementChildren;
-        }
-
+    if (registry.comment) |comment| { // write the comment element
         try out.writeAll(
+            \\//!
             \\//! Registry comment:
             \\
         );
-        var comment_line_iter = std.mem.split(u8, std.mem.trim(u8, element.children[0].text, &.{ '\n', ' ' }), "\n");
+        var comment_line_iter = std.mem.split(u8, std.mem.trim(u8, comment, &.{ '\n', ' ' }), "\n");
         var longest_line_bytes: u32 = 0;
         while (comment_line_iter.next()) |line| {
             longest_line_bytes = @max(@intCast(u32, line.len), longest_line_bytes);
         }
 
         try out.writeAll("//! ");
-        try out.writeByteNTimes('-', longest_line_bytes);
+        try out.writeByteNTimes('-', longest_line_bytes + 1);
         try out.writeByte('\n');
         comment_line_iter.reset();
         while (comment_line_iter.next()) |line| {
             try out.print("//! {s}\n", .{line});
         }
-        try out.writeAll("//! ");
-        try out.writeByteNTimes('-', longest_line_bytes);
-        try out.writeAll(
-            \\
-            \\//!
-            \\
-        );
+        try out.writeAll("//!");
+        try out.writeByteNTimes('-', longest_line_bytes + 1);
+        try out.writeAll("\n");
     }
-
     try out.writeAll(
-        \\const gl = @This();
-        \\
-        \\pub const Enum = u32;
-        \\
+        \\//!
         \\
     );
+
+    try out_writer_buffered.flush();
 }
 
 const Registry = struct {
-    /// Text content of the '<comment>' element (presumably only one).
+    /// Text content of the `<comment>` element (presumably only one).
     comment: ?[]const u8,
-    /// '<type>' entries from the '<types>' element (presumably there is usually only one).
+    /// `<type>` entries from the `<types>` element (presumably there is usually only one).
     types: []const TypeEntry,
-    /// true if registry contains '<groups>' element.
+    /// true if registry contains `<groups>` element.
     groups_elem: bool,
     enum_sets: []const EnumsSet,
-    /// '<commands>' element (presumably there is usually only one).
+    /// `<commands>` element (presumably there is usually only one).
     commands: Commands,
     features: []const FeatureSetGroup,
-    /// '<extension>' elements from the '<extensions>' element (presumably there is usually only one).
+    /// `<extension>` elements from the `<extensions>` element (presumably there is usually only one).
     extensions: []const Extension,
 
     pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
@@ -980,18 +957,98 @@ const Registry = struct {
         };
         errdefer commands.deinit(allocator);
 
-        return std.mem.zeroInit(Registry, .{
+        const features: []const FeatureSetGroup = feat: {
+            var features = std.ArrayList(FeatureSetGroup).init(allocator);
+            defer features.deinit();
+
+            var feature_set_group_iter = tree.childElementIterator("feature");
+            while (feature_set_group_iter.next()) |feature_set_group_elem| {
+                const feature_set_group_api: gl_targets.Api = api: {
+                    const api_str = feature_set_group_elem.getAttributeValue("api") orelse
+                        return error.FeatureMissingApiAttribute;
+                    break :api std.meta.stringToEnum(gl_targets.Api, api_str) orelse
+                        return error.FeatureHasUnrecognisedApi;
+                };
+                const feature_set_group_name: gl_targets.Version = name: {
+                    const name_str = feature_set_group_elem.getAttributeValue("name") orelse
+                        return error.FeatureMissingNameAttribute;
+                    break :name std.meta.stringToEnum(gl_targets.Version, name_str) orelse
+                        return error.FeatureHasUnrecognisedName;
+                };
+                const feature_set_group_number: FeatureSetGroup.Number = num: {
+                    const number_str = feature_set_group_elem.getAttributeValue("number") orelse
+                        return error.FeatureMissingNumberAttribute;
+                    break :num try FeatureSetGroup.Number.parse(number_str);
+                };
+
+                const feature_set_group_protect: ?[]const u8 = if (feature_set_group_elem.getAttributeValue("protect")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(feature_set_group_protect orelse "");
+
+                const feature_set_group_comment: ?[]const u8 = if (feature_set_group_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(feature_set_group_comment orelse "");
+
+                var require_sets_list = std.ArrayList(FeatureSetGroup.FeatureSet).init(allocator);
+                defer require_sets_list.deinit();
+                errdefer for (require_sets_list.items) |set| set.deinit(allocator);
+
+                var remove_sets_list = std.ArrayList(FeatureSetGroup.FeatureSet).init(allocator);
+                defer remove_sets_list.deinit();
+                errdefer for (remove_sets_list.items) |set| set.deinit(allocator);
+
+                for (feature_set_group_elem.children) |set_group_child| {
+                    const feature_set_elem: xml.Element = switch (set_group_child) {
+                        .comment => continue,
+                        .text => return error.UnexpectedTextInFeatureSetGroup,
+                        .element => |elem| elem,
+                    };
+                    const feature_set_tag = std.meta.stringToEnum(enum { require, remove }, feature_set_elem.name) orelse {
+                        return error.FeatureSetUnrecognizedTag;
+                    };
+                    switch (feature_set_tag) {
+                        .require => {},
+                        .remove => {},
+                    }
+                    @panic("todo");
+                }
+
+                const require_sets = try require_sets_list.toOwnedSlice();
+                errdefer allocator.free(require_sets);
+
+                const remove_sets = try remove_sets_list.toOwnedSlice();
+                errdefer allocator.free(remove_sets);
+
+                try features.append(FeatureSetGroup{
+                    .api = feature_set_group_api,
+                    .name = feature_set_group_name,
+                    .number = feature_set_group_number,
+                    .protect = feature_set_group_protect,
+                    .comment = feature_set_group_comment,
+                    .require_sets = require_sets,
+                    .remove_sets = remove_sets,
+                });
+            }
+
+            break :feat try features.toOwnedSlice();
+        };
+        errdefer allocator.free(features);
+
+        const extensions: []const Extension = ext: {
+            var extensions = std.ArrayList(Extension).init(allocator);
+            defer extensions.deinit();
+
+            break :ext try extensions.toOwnedSlice();
+        };
+        errdefer allocator.free(extensions);
+
+        return Registry{
             .comment = top_level_comment,
             .types = types,
             .groups_elem = groups_elem,
             .enum_sets = enum_sets,
             .commands = commands,
-        });
-        // return Registry{
-        //     .comment = top_level_comment,
-        //     .types = types,
-        //     .enum_sets = enum_sets,
-        // };
+            .features = features,
+            .extensions = extensions,
+        };
     }
 
     pub fn deinit(reg: Registry, allocator: std.mem.Allocator) void {
@@ -1016,7 +1073,7 @@ const Registry = struct {
         requires: ?[]const u8,
         name: []const u8,
         /// True if the name was found in the body of the type definition
-        /// in a '<name>' element, instead of as an attribute
+        /// in a `<name>` element, instead of as an attribute
         name_in_body: bool,
         api: ?gl_targets.Api,
         comment: ?[]const u8,
@@ -1129,7 +1186,7 @@ const Registry = struct {
 
     const Commands = struct {
         namespace: []const u8,
-        /// list of the contained '<command>' element tags.
+        /// list of the contained `<command>` element tags.
         entries: []const Entry,
 
         pub fn deinit(self: Commands, allocator: std.mem.Allocator) void {
@@ -1143,13 +1200,13 @@ const Registry = struct {
             proto: Proto,
             /// list of the <param>
             params: []const Param,
-            /// the value of the 'name' attribute of the '<alias>' element.
+            /// the value of the 'name' attribute of the `<alias>` element.
             /// no documentation specifies, but I presume there should only ever be one of these at a time.
             alias: ?[]const u8,
-            /// the value of the 'name' attribute of the '<vecequiv>' element.
+            /// the value of the 'name' attribute of the `<vecequiv>` element.
             /// no documentation specifies, but I presume there should only ever be one of these at a time.
             vecequiv: ?[]const u8,
-            /// the '<glx>' elements.
+            /// the `<glx>` elements.
             glx: []const GlxInfo,
 
             pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
@@ -1177,7 +1234,7 @@ const Registry = struct {
                 }
 
                 const Component = struct {
-                    /// true if the text is enclosed in a '<ptype>' element.
+                    /// true if the text is enclosed in a `<ptype>` element.
                     is_ptype: bool,
                     text: []const u8,
 
@@ -1203,7 +1260,7 @@ const Registry = struct {
                 }
 
                 const Component = struct {
-                    /// true if the text is enclosed in a '<ptype>' element.
+                    /// true if the text is enclosed in a `<ptype>` element.
                     is_ptype: bool,
                     text: []const u8,
 
@@ -1213,7 +1270,7 @@ const Registry = struct {
                 };
             };
             const GlxInfo = struct {
-                //! The readme.pdf that lives with the official gl.xml doesn't seem to describe the '<glx>' tag
+                //! The readme.pdf that lives with the official gl.xml doesn't seem to describe the `<glx>` tag
                 //! directly, but every discoverable example of it I've seen has exactly these attributes.
                 type: []const u8,
                 opcode: []const u8,
