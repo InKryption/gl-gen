@@ -7,7 +7,11 @@ const assert = std.debug.assert;
 pub fn main() !void {
     const log = std.log.default;
 
-    const allocator = std.heap.c_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 16 }){};
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
+    // const allocator = std.heap.c_allocator;
 
     const args: GenerationArgs = args: {
         var args_iter = try std.process.argsWithAllocator(allocator);
@@ -53,12 +57,12 @@ pub fn main() !void {
     if (false) { // debug print the type decls
         for (registry.types) |type_entry| {
             std.debug.print(
-                \\ * {s}:
-                \\  + requires: {?s}
-                \\  + API: {?s}
-                \\  + comment: {?s}
-                \\  + name in body: {}
-                \\  + C Definition: "
+                \\{s}:
+                \\  * requires: {?s}
+                \\  * API: {?s}
+                \\  * comment: {?s}
+                \\  * name in body: {}
+                \\  * C Definition: "
             , .{
                 type_entry.name,
                 type_entry.requires,
@@ -162,7 +166,7 @@ pub fn main() !void {
     }
 
     if (false) { // debug print the commands
-        std.debug.print("* Commands (Namespace={s}):\n", .{registry.commands.namespace});
+        std.debug.print("Commands (Namespace={s}):\n", .{registry.commands.namespace});
         for (registry.commands.entries) |cmd| {
             assert(!cmd.proto.def[cmd.proto.name_index].is_ptype);
             std.debug.print("   + \"", .{});
@@ -204,6 +208,80 @@ pub fn main() !void {
                 }
             }
             std.debug.print("\n", .{});
+        }
+    }
+
+    if (false) { // debug print the features
+        for (registry.features) |feature| {
+            std.debug.print(
+                \\Feature ({s}):
+                \\  * API: {s}
+                \\  * Number: {d}.{d}
+                \\
+            , .{
+                @tagName(feature.name),
+                @tagName(feature.api),
+                feature.number.major,
+                feature.number.minor,
+            });
+            if (feature.comment) |comment| {
+                std.debug.print(
+                    \\  * Comment: "{s}"
+                    \\
+                , .{comment});
+            }
+            if (feature.protect) |protect| {
+                std.debug.print(
+                    \\  * Protect: {s}
+                    \\
+                , .{protect});
+            }
+            for ([_][]const Registry.FeatureSetGroup.FeatureSet{ feature.require_sets, feature.remove_sets }, 0..) |set_group, i| {
+                std.debug.print(
+                    \\  * {s} sets:
+                    \\
+                , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
+                for (set_group) |set| {
+                    std.debug.print("    º Set:", .{});
+                    if (set.profile) |profile| {
+                        std.debug.print(" profile={s}", .{@tagName(profile)});
+                    }
+                    if (set.comment) |comment| {
+                        if (set.profile != null) std.debug.print(",", .{});
+                        std.debug.print(" comment=\"{s}\"", .{comment});
+                    }
+                    std.debug.print("\n", .{});
+
+                    std.debug.print("      + Commands:", .{});
+                    if (set.commands.len == 0) std.debug.print(" (none)", .{});
+                    std.debug.print("\n", .{});
+                    for (set.commands) |cmd| {
+                        std.debug.print("        - {s}", .{cmd.name});
+                        if (cmd.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
+                        std.debug.print("\n", .{});
+                    }
+
+                    std.debug.print("      + Enums:", .{});
+                    if (set.enums.len == 0) std.debug.print(" (none)", .{});
+                    std.debug.print("\n", .{});
+                    for (set.enums) |enumerant| {
+                        std.debug.print("        - {s}", .{enumerant.name});
+                        if (enumerant.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
+                        std.debug.print("\n", .{});
+                    }
+
+                    std.debug.print("      + Types:", .{});
+                    if (set.types.len == 0) std.debug.print(" (none)", .{});
+                    std.debug.print("\n", .{});
+                    for (set.types) |@"type"| {
+                        std.debug.print("        - {s}", .{@"type".name});
+                        if (@"type".comment) |comment| std.debug.print(": \"{s}\"", .{comment});
+                        std.debug.print("\n", .{});
+                    }
+
+                    std.debug.print("\n", .{});
+                }
+            }
         }
     }
 
@@ -330,14 +408,12 @@ const Registry = struct {
                     return error.UnexpectedNonTypeElementInTypesElement;
                 }
 
-                const requires: ?[]const u8 =
-                    if (type_elem.getAttributeValue("requires")) |requires| try allocator.dupe(u8, requires) else null;
+                const requires: ?[]const u8 = if (type_elem.getAttributeValue("requires")) |str| try allocator.dupe(u8, str) else null;
                 errdefer allocator.free(requires orelse "");
 
                 const api: ?gl_targets.Api = api: {
                     const api_str = type_elem.getAttributeValue("api") orelse break :api null;
-                    const api = try (std.meta.stringToEnum(gl_targets.Api, api_str) orelse
-                        error.UnrecognisedApiInTypeAttribute);
+                    const api = try (std.meta.stringToEnum(gl_targets.Api, api_str) orelse error.UnrecognisedApiInTypeAttribute);
                     break :api api;
                 };
 
@@ -741,6 +817,7 @@ const Registry = struct {
                         .def = proto_def,
                     };
                 };
+                errdefer proto.deinit(allocator);
 
                 const maybe_first_non_param_index: ?usize = for (command_elem.children[proto_elem_index + 1 ..], proto_elem_index + 1..) |cmd_elem_child, i| {
                     const param_elem: xml.Element = switch (cmd_elem_child) {
@@ -957,6 +1034,58 @@ const Registry = struct {
         };
         errdefer commands.deinit(allocator);
 
+        const helper = struct {
+            inline fn collectFeatures(
+                ally: std.mem.Allocator,
+                feature_set_elem: xml.Element,
+                feature_set_lists: struct {
+                    commands: *std.ArrayList(FeatureSetGroup.FeatureSet.Command),
+                    enums: *std.ArrayList(FeatureSetGroup.FeatureSet.Enum),
+                    types: *std.ArrayList(FeatureSetGroup.FeatureSet.Type),
+                },
+            ) !void {
+                const feature_set_commands_list = feature_set_lists.commands;
+                const feature_set_enums_list = feature_set_lists.enums;
+                const feature_set_types_list = feature_set_lists.types;
+
+                for (feature_set_elem.children) |feature_set_child| {
+                    const feature_elem: xml.Element = switch (feature_set_child) {
+                        .element => |elem| elem,
+                        .comment => continue,
+                        .text => return error.UnexpectedTextInFeatureSet,
+                    };
+                    const feature_tag = std.meta.stringToEnum(enum { command, @"enum", type }, feature_elem.name) orelse {
+                        return error.FeatureUnrecognizedTag;
+                    };
+
+                    const feature_name: []const u8 = if (feature_elem.getAttributeValue("name")) |str|
+                        try ally.dupe(u8, str)
+                    else {
+                        return error.FeatureMissingNameAttribute;
+                    };
+                    errdefer ally.free(feature_name);
+
+                    const feature_comment: ?[]const u8 = if (feature_elem.getAttributeValue("comment")) |str| try ally.dupe(u8, str) else null;
+                    errdefer ally.free(feature_comment orelse "");
+
+                    switch (feature_tag) {
+                        .command => try feature_set_commands_list.append(FeatureSetGroup.FeatureSet.Command{
+                            .name = feature_name,
+                            .comment = feature_comment,
+                        }),
+                        .@"enum" => try feature_set_enums_list.append(FeatureSetGroup.FeatureSet.Enum{
+                            .name = feature_name,
+                            .comment = feature_comment,
+                        }),
+                        .type => try feature_set_types_list.append(FeatureSetGroup.FeatureSet.Type{
+                            .name = feature_name,
+                            .comment = feature_comment,
+                        }),
+                    }
+                }
+            }
+        };
+
         const features: []const FeatureSetGroup = feat: {
             var features = std.ArrayList(FeatureSetGroup).init(allocator);
             defer features.deinit();
@@ -1004,18 +1133,69 @@ const Registry = struct {
                     const feature_set_tag = std.meta.stringToEnum(enum { require, remove }, feature_set_elem.name) orelse {
                         return error.FeatureSetUnrecognizedTag;
                     };
-                    switch (feature_set_tag) {
-                        .require => {},
-                        .remove => {},
+                    if (feature_set_elem.getAttributeIndex("api") != null) {
+                        return error.NonExtensionFeatureSetHasApiAttribute;
                     }
-                    @panic("todo");
+
+                    const feature_set_profile: ?gl_targets.Profile = blk: {
+                        const str: []const u8 = feature_set_elem.getAttributeValue("profile") orelse break :blk null;
+                        break :blk try (std.meta.stringToEnum(gl_targets.Profile, str) orelse error.UnrecognisedFeatureSetProfile);
+                    };
+                    const feature_set_comment: ?[]const u8 = if (feature_set_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                    errdefer allocator.free(feature_set_comment orelse "");
+
+                    var feature_set_commands_list = std.ArrayList(FeatureSetGroup.FeatureSet.Command).init(allocator);
+                    defer feature_set_commands_list.deinit();
+                    errdefer for (feature_set_commands_list.items) |cmd| cmd.deinit(allocator);
+
+                    var feature_set_enums_list = std.ArrayList(FeatureSetGroup.FeatureSet.Enum).init(allocator);
+                    defer feature_set_enums_list.deinit();
+                    errdefer for (feature_set_enums_list.items) |enumerant| enumerant.deinit(allocator);
+
+                    var feature_set_types_list = std.ArrayList(FeatureSetGroup.FeatureSet.Type).init(allocator);
+                    defer feature_set_types_list.deinit();
+                    errdefer for (feature_set_types_list.items) |@"type"| @"type".deinit(allocator);
+
+                    try helper.collectFeatures(allocator, feature_set_elem, .{
+                        .commands = &feature_set_commands_list,
+                        .enums = &feature_set_enums_list,
+                        .types = &feature_set_types_list,
+                    });
+
+                    const feature_set_commands: []const FeatureSetGroup.FeatureSet.Command = try feature_set_commands_list.toOwnedSlice();
+                    errdefer allocator.free(feature_set_commands);
+                    errdefer for (feature_set_commands) |cmd| cmd.deinit(allocator);
+
+                    const feature_set_enums: []const FeatureSetGroup.FeatureSet.Enum = try feature_set_enums_list.toOwnedSlice();
+                    errdefer allocator.free(feature_set_enums);
+                    errdefer for (feature_set_enums) |enumerant| enumerant.deinit(allocator);
+
+                    const feature_set_types: []const FeatureSetGroup.FeatureSet.Type = try feature_set_types_list.toOwnedSlice();
+                    errdefer allocator.free(feature_set_types);
+                    errdefer for (feature_set_types) |@"type"| @"type".deinit(allocator);
+
+                    const feature_set = FeatureSetGroup.FeatureSet{
+                        .profile = feature_set_profile,
+                        .comment = feature_set_comment,
+
+                        .commands = feature_set_commands,
+                        .enums = feature_set_enums,
+                        .types = feature_set_types,
+                    };
+
+                    switch (feature_set_tag) {
+                        .require => try require_sets_list.append(feature_set),
+                        .remove => try remove_sets_list.append(feature_set),
+                    }
                 }
 
-                const require_sets = try require_sets_list.toOwnedSlice();
+                const require_sets: []const FeatureSetGroup.FeatureSet = try require_sets_list.toOwnedSlice();
                 errdefer allocator.free(require_sets);
+                errdefer for (require_sets) |set| set.deinit(allocator);
 
-                const remove_sets = try remove_sets_list.toOwnedSlice();
+                const remove_sets: []const FeatureSetGroup.FeatureSet = try remove_sets_list.toOwnedSlice();
                 errdefer allocator.free(remove_sets);
+                errdefer for (remove_sets) |set| set.deinit(allocator);
 
                 try features.append(FeatureSetGroup{
                     .api = feature_set_group_api,
@@ -1030,15 +1210,156 @@ const Registry = struct {
 
             break :feat try features.toOwnedSlice();
         };
-        errdefer allocator.free(features);
+        errdefer {
+            for (features) |feature| feature.deinit(allocator);
+            allocator.free(features);
+        }
 
         const extensions: []const Extension = ext: {
             var extensions = std.ArrayList(Extension).init(allocator);
             defer extensions.deinit();
+            errdefer for (extensions.items) |ext| ext.deinit(allocator);
+
+            const top_level_extension_element_index = tree.getChildElementIndexPos("extensions", 0) orelse {
+                return error.RegistryMissingExtensionsElement;
+            };
+            if (tree.getChildElementIndexPos("extensions", top_level_extension_element_index + 1) != null) {
+                return error.TooManyTopLevelExtensionsElements;
+            }
+            const top_level_extension_element: xml.Element = tree.children[top_level_extension_element_index].element;
+
+            for (top_level_extension_element.children) |maybe_extension_elem| {
+                const extension_elem: xml.Element = switch (maybe_extension_elem) {
+                    .element => |elem| elem,
+                    .comment => continue,
+                    .text => return error.UnexpectedTextInTopLevelExtensionElement,
+                };
+                if (!std.mem.eql(u8, extension_elem.name, "extension")) {
+                    return error.UnexpectedElementInTopLevelExtensionElement;
+                }
+
+                const extension_name: []const u8 = if (extension_elem.getAttributeValue("supported")) |str|
+                    try allocator.dupe(u8, str)
+                else {
+                    return error.ExtensionMissingNameAttribute;
+                };
+                errdefer allocator.free(extension_name);
+
+                const extension_supported: []const u8 = if (extension_elem.getAttributeValue("supported")) |str|
+                    try allocator.dupe(u8, str)
+                else {
+                    return error.ExtensionMissingSupportedAttribute;
+                };
+                errdefer allocator.free(extension_supported);
+
+                const extension_protect: ?[]const u8 = if (extension_elem.getAttributeValue("protect")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(extension_protect orelse "");
+
+                const extension_comment: ?[]const u8 = if (extension_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                errdefer allocator.free(extension_comment orelse "");
+
+                var require_sets_list = std.ArrayList(Extension.FeatureSet).init(allocator);
+                defer require_sets_list.deinit();
+                errdefer for (require_sets_list.items) |set| set.deinit(allocator);
+
+                var remove_sets_list = std.ArrayList(Extension.FeatureSet).init(allocator);
+                defer remove_sets_list.deinit();
+                errdefer for (remove_sets_list.items) |set| set.deinit(allocator);
+
+                for (extension_elem.children) |extension_child| {
+                    const feature_set_elem: xml.Element = switch (extension_child) {
+                        .element => |elem| elem,
+                        .comment => continue,
+                        .text => return error.UnexpectedTextInExtensionElement,
+                    };
+                    const feature_set_tag = std.meta.stringToEnum(enum { require, remove }, feature_set_elem.name) orelse {
+                        return error.ExtensionFeatureSetUnrecognizedTag;
+                    };
+
+                    const feature_set_api: ?gl_targets.Api = blk: {
+                        const str: []const u8 = feature_set_elem.getAttributeValue("api") orelse break :blk null;
+                        break :blk try (std.meta.stringToEnum(gl_targets.Api, str) orelse error.UnrecognisedExtensionFeatureSetApi);
+                    };
+
+                    const feature_set_profile: ?gl_targets.Profile = blk: {
+                        const str: []const u8 = feature_set_elem.getAttributeValue("profile") orelse break :blk null;
+                        break :blk try (std.meta.stringToEnum(gl_targets.Profile, str) orelse error.UnrecognisedFeatureSetProfile);
+                    };
+
+                    const feature_set_comment: ?[]const u8 = if (feature_set_elem.getAttributeValue("comment")) |str| try allocator.dupe(u8, str) else null;
+                    errdefer allocator.free(feature_set_comment orelse "");
+
+                    var feature_set_commands_list = std.ArrayList(FeatureSetGroup.FeatureSet.Command).init(allocator);
+                    defer feature_set_commands_list.deinit();
+                    errdefer for (feature_set_commands_list.items) |cmd| cmd.deinit(allocator);
+
+                    var feature_set_enums_list = std.ArrayList(Extension.FeatureSet.Enum).init(allocator);
+                    defer feature_set_enums_list.deinit();
+                    errdefer for (feature_set_enums_list.items) |enumerant| enumerant.deinit(allocator);
+
+                    var feature_set_types_list = std.ArrayList(Extension.FeatureSet.Type).init(allocator);
+                    defer feature_set_types_list.deinit();
+                    errdefer for (feature_set_types_list.items) |@"type"| @"type".deinit(allocator);
+
+                    try helper.collectFeatures(allocator, feature_set_elem, .{
+                        .commands = &feature_set_commands_list,
+                        .enums = &feature_set_enums_list,
+                        .types = &feature_set_types_list,
+                    });
+
+                    const feature_set_commands: []const Extension.FeatureSet.Command = try feature_set_commands_list.toOwnedSlice();
+                    errdefer allocator.free(feature_set_commands);
+                    errdefer for (feature_set_commands) |cmd| cmd.deinit(allocator);
+
+                    const feature_set_enums: []const Extension.FeatureSet.Enum = try feature_set_enums_list.toOwnedSlice();
+                    errdefer allocator.free(feature_set_enums);
+                    errdefer for (feature_set_enums) |enumerant| enumerant.deinit(allocator);
+
+                    const feature_set_types: []const Extension.FeatureSet.Type = try feature_set_types_list.toOwnedSlice();
+                    errdefer allocator.free(feature_set_types);
+                    errdefer for (feature_set_types) |@"type"| @"type".deinit(allocator);
+
+                    const feature_set = Extension.FeatureSet{
+                        .profile = feature_set_profile,
+                        .comment = feature_set_comment,
+                        .api = feature_set_api,
+
+                        .commands = feature_set_commands,
+                        .enums = feature_set_enums,
+                        .types = feature_set_types,
+                    };
+
+                    switch (feature_set_tag) {
+                        .require => try require_sets_list.append(feature_set),
+                        .remove => try remove_sets_list.append(feature_set),
+                    }
+                }
+
+                const require_sets: []const Extension.FeatureSet = try require_sets_list.toOwnedSlice();
+                errdefer for (require_sets) |set| set.deinit(allocator);
+                errdefer allocator.free(require_sets);
+
+                const remove_sets: []const Extension.FeatureSet = try remove_sets_list.toOwnedSlice();
+                errdefer for (remove_sets) |set| set.deinit(allocator);
+                errdefer allocator.free(remove_sets);
+
+                try extensions.append(Extension{
+                    .name = extension_name,
+                    .supported = extension_supported,
+                    .protect = extension_protect,
+                    .comment = extension_comment,
+
+                    .require_sets = require_sets,
+                    .remove_sets = remove_sets,
+                });
+            }
 
             break :ext try extensions.toOwnedSlice();
         };
-        errdefer allocator.free(extensions);
+        errdefer {
+            for (extensions) |ext| ext.deinit(allocator);
+            allocator.free(extensions);
+        }
 
         return Registry{
             .comment = top_level_comment,
@@ -1191,6 +1512,7 @@ const Registry = struct {
 
         pub fn deinit(self: Commands, allocator: std.mem.Allocator) void {
             allocator.free(self.namespace);
+
             for (self.entries) |entry| entry.deinit(allocator);
             allocator.free(self.entries);
         }
@@ -1218,7 +1540,9 @@ const Registry = struct {
 
                 allocator.free(self.alias orelse "");
                 allocator.free(self.vecequiv orelse "");
+
                 for (self.glx) |info| info.deinit(allocator);
+                allocator.free(self.glx);
             }
 
             const Proto = struct {
@@ -1255,6 +1579,7 @@ const Registry = struct {
                     allocator.free(self.group orelse "");
                     allocator.free(self.len orelse "");
                     allocator.free(self.class orelse "");
+
                     for (self.def) |component| component.deinit(allocator);
                     allocator.free(self.def);
                 }
@@ -1281,6 +1606,8 @@ const Registry = struct {
                 pub fn deinit(self: GlxInfo, allocator: std.mem.Allocator) void {
                     allocator.free(self.type);
                     allocator.free(self.opcode);
+                    allocator.free(self.name orelse "");
+                    allocator.free(self.comment orelse "");
                 }
             };
         };
