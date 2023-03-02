@@ -239,8 +239,10 @@ pub fn main() !void {
             for ([_][]const Registry.FeatureSetGroup.FeatureSet{ feature.require_sets, feature.remove_sets }, 0..) |set_group, i| {
                 std.debug.print(
                     \\  * {s} sets:
-                    \\
                 , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
+                if (set_group.len == 0) std.debug.print(" (none)", .{});
+                std.debug.print("\n", .{});
+
                 for (set_group) |set| {
                     std.debug.print("    º Set:", .{});
                     if (set.profile) |profile| {
@@ -281,7 +283,77 @@ pub fn main() !void {
 
                     std.debug.print("\n", .{});
                 }
+                std.debug.print("\n", .{});
             }
+        }
+    }
+
+    if (false) { // debug print the extensions
+        for (registry.extensions) |extension| {
+            std.debug.print(
+                \\{s}:
+                \\  + Supported: "{s}"
+                \\
+            , .{
+                extension.name,
+                extension.supported,
+            });
+            if (extension.protect) |protect| std.debug.print("  + Protect: \"{s}\"\n", .{protect});
+            if (extension.comment) |comment| std.debug.print("  + Comment: \"{s}\"\n", .{comment});
+
+            for ([_][]const Registry.Extension.FeatureSet{ extension.require_sets, extension.remove_sets }, 0..) |set_group, i| {
+                std.debug.print(
+                    \\  + {s} sets:
+                , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
+                if (set_group.len == 0) std.debug.print(" (none)", .{});
+                std.debug.print("\n", .{});
+
+                for (set_group) |set| {
+                    std.debug.print("    º Set:", .{});
+                    if (set.api) |api| {
+                        std.debug.print(" API=\"{s}\"", .{@tagName(api)});
+                    }
+                    if (set.profile) |profile| {
+                        if (set.api != null) std.debug.print(",", .{});
+                        std.debug.print(" profile={s}", .{@tagName(profile)});
+                    }
+                    if (set.comment) |comment| {
+                        if (set.profile != null) std.debug.print(",", .{});
+                        std.debug.print(" comment=\"{s}\"", .{comment});
+                    }
+                    std.debug.print("\n", .{});
+
+                    std.debug.print("      + Commands:", .{});
+                    if (set.commands.len == 0) std.debug.print(" (none)", .{});
+                    std.debug.print("\n", .{});
+                    for (set.commands) |cmd| {
+                        std.debug.print("        - {s}", .{cmd.name});
+                        if (cmd.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
+                        std.debug.print("\n", .{});
+                    }
+
+                    std.debug.print("      + Enums:", .{});
+                    if (set.enums.len == 0) std.debug.print(" (none)", .{});
+                    std.debug.print("\n", .{});
+                    for (set.enums) |enumerant| {
+                        std.debug.print("        - {s}", .{enumerant.name});
+                        if (enumerant.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
+                        std.debug.print("\n", .{});
+                    }
+
+                    std.debug.print("      + Types:", .{});
+                    if (set.types.len == 0) std.debug.print(" (none)", .{});
+                    std.debug.print("\n", .{});
+                    for (set.types) |@"type"| {
+                        std.debug.print("        - {s}", .{@"type".name});
+                        if (@"type".comment) |comment| std.debug.print(": \"{s}\"", .{comment});
+                        std.debug.print("\n", .{});
+                    }
+
+                    std.debug.print("\n", .{});
+                }
+            }
+            std.debug.print("\n", .{});
         }
     }
 
@@ -1238,7 +1310,7 @@ const Registry = struct {
                     return error.UnexpectedElementInTopLevelExtensionElement;
                 }
 
-                const extension_name: []const u8 = if (extension_elem.getAttributeValue("supported")) |str|
+                const extension_name: []const u8 = if (extension_elem.getAttributeValue("name")) |str|
                     try allocator.dupe(u8, str)
                 else {
                     return error.ExtensionMissingNameAttribute;
