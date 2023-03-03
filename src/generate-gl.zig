@@ -20,8 +20,8 @@ pub fn main() !void {
     };
     defer args.deinit(allocator);
 
-    const api_version: gl_targets.Version = args.api_version;
-    const api_profile: gl_targets.Profile = args.api_profile;
+    const target_api_version: gl_targets.Version = args.api_version;
+    const target_api_profile: gl_targets.Profile = args.api_profile;
 
     const registry: Registry = reg: {
         const tree: xml.Tree = tree: {
@@ -367,57 +367,312 @@ pub fn main() !void {
     defer assert(!must_flush_out_writer_buffered or out_writer_buffered.end == 0);
     errdefer must_flush_out_writer_buffered = false;
 
-    // top level doc comment describing generation parameters
-    try out.print(
-        \\//!
-        \\//! Generation parameters:
-        \\//! * API: {s}
-        \\//! * Profile: {s}
-        \\//! * Extensions: 
-    , .{
-        @tagName(api_version),
-        @tagName(api_profile),
-    });
+    { // write the top level doc commment
+        // describe generation parameters
+        try out.print(
+            \\//!
+            \\//! Generation parameters:
+            \\//! * API: {s}
+            \\//! * Profile: {s}
+            \\//! * Extensions: 
+        , .{
+            @tagName(target_api_version),
+            @tagName(target_api_profile),
+        });
 
-    if (args.extensions.len == 0) {
-        try out.writeAll("(none)\n");
-    } else {
-        for (args.extensions, 0..) |ext, i| {
-            if (i != 0) try out.writeAll(", ");
-            try out.print("\"{s}\"", .{ext});
+        if (args.extensions.len == 0) {
+            try out.writeAll("(none)\n");
+        } else {
+            for (args.extensions, 0..) |ext, i| {
+                if (i != 0) try out.writeAll(", ");
+                try out.print("\"{s}\"", .{ext});
+            }
+            try out.writeAll("\n");
         }
-        try out.writeAll("\n");
-    }
 
-    if (registry.comment) |comment| { // write the comment element
+        if (registry.comment) |comment| { // write the comment element
+            try out.writeAll(
+                \\//!
+                \\//! Registry comment:
+                \\
+            );
+            var comment_line_iter = std.mem.split(u8, std.mem.trim(u8, comment, &.{ '\n', ' ' }), "\n");
+            var longest_line_bytes: u32 = 0;
+            while (comment_line_iter.next()) |line| {
+                longest_line_bytes = @max(@intCast(u32, line.len), longest_line_bytes);
+            }
+
+            try out.writeAll("//! ");
+            try out.writeByteNTimes('-', longest_line_bytes + 1);
+            try out.writeByte('\n');
+            comment_line_iter.reset();
+            while (comment_line_iter.next()) |line| {
+                try out.print("//! {s}\n", .{line});
+            }
+            try out.writeAll("//!");
+            try out.writeByteNTimes('-', longest_line_bytes + 1);
+            try out.writeAll("\n");
+        }
         try out.writeAll(
             \\//!
-            \\//! Registry comment:
             \\
         );
-        var comment_line_iter = std.mem.split(u8, std.mem.trim(u8, comment, &.{ '\n', ' ' }), "\n");
-        var longest_line_bytes: u32 = 0;
-        while (comment_line_iter.next()) |line| {
-            longest_line_bytes = @max(@intCast(u32, line.len), longest_line_bytes);
+    }
+
+    var required_types = std.StringArrayHashMap(*const Registry.FeatureSetGroup.FeatureSet.Type).init(allocator);
+    defer required_types.deinit();
+
+    var required_enums = std.StringArrayHashMap(*const Registry.FeatureSetGroup.FeatureSet.Enum).init(allocator);
+    defer required_enums.deinit();
+
+    var required_commands = std.StringArrayHashMap(*const Registry.FeatureSetGroup.FeatureSet.Command).init(allocator);
+    defer required_commands.deinit();
+
+    { // collect required stuff from target features
+        var removed_types = std.StringArrayHashMap(void).init(allocator);
+        defer {
+            for (removed_types.keys()) |name| {
+                _ = required_types.swapRemove(name);
+            }
+            removed_types.deinit();
         }
 
-        try out.writeAll("//! ");
-        try out.writeByteNTimes('-', longest_line_bytes + 1);
-        try out.writeByte('\n');
-        comment_line_iter.reset();
-        while (comment_line_iter.next()) |line| {
-            try out.print("//! {s}\n", .{line});
+        var removed_enums = std.StringArrayHashMap(void).init(allocator);
+        defer {
+            for (removed_enums.keys()) |name| {
+                _ = required_enums.swapRemove(name);
+            }
+            removed_enums.deinit();
         }
-        try out.writeAll("//!");
-        try out.writeByteNTimes('-', longest_line_bytes + 1);
-        try out.writeAll("\n");
+
+        var removed_commands = std.StringArrayHashMap(void).init(allocator);
+        defer {
+            for (removed_commands.keys()) |name| {
+                _ = required_commands.swapRemove(name);
+            }
+            removed_commands.deinit();
+        }
+
+        const target_feature_set_group: Registry.FeatureSetGroup = for (registry.features) |feature_set_group| {
+            if (feature_set_group.name == target_api_version) break feature_set_group;
+        } else return error.RegistryDoesntContainTargetFeatureSet;
+
+        for (registry.features) |feature_set_group| {
+            if (feature_set_group.api != target_feature_set_group.api) {
+                continue;
+            }
+            switch (feature_set_group.number.order(target_feature_set_group.number)) {
+                .gt => continue,
+                .lt, .eq => {},
+            }
+            _ = feature_set_group.protect; // TODO: Does this matter? Declaration order won't matter, but could it depend on something that isn't explicitly "required"?
+
+            for (feature_set_group.require_sets) |require_set| {
+                if (require_set.profile) |set_profile| {
+                    if (set_profile != target_api_profile) continue;
+                }
+
+                try required_types.ensureUnusedCapacity(require_set.types.len);
+                for (require_set.types) |*@"type"| {
+                    required_types.putAssumeCapacity(@"type".name, @"type");
+                }
+
+                try required_enums.ensureUnusedCapacity(require_set.enums.len);
+                for (require_set.enums) |*@"enum"| {
+                    required_enums.putAssumeCapacity(@"enum".name, @"enum");
+                }
+
+                try required_commands.ensureUnusedCapacity(require_set.commands.len);
+                for (require_set.commands) |*command| {
+                    required_commands.putAssumeCapacity(command.name, command);
+                }
+            }
+
+            for (feature_set_group.remove_sets) |remove_set| {
+                if (remove_set.profile) |set_profile| {
+                    if (set_profile != target_api_profile) continue;
+                }
+
+                try removed_types.ensureUnusedCapacity(remove_set.types.len);
+                for (remove_set.types) |@"type"| {
+                    removed_types.putAssumeCapacity(@"type".name, {});
+                }
+
+                try removed_enums.ensureUnusedCapacity(remove_set.enums.len);
+                for (remove_set.enums) |@"enum"| {
+                    removed_enums.putAssumeCapacity(@"enum".name, {});
+                }
+
+                try removed_commands.ensureUnusedCapacity(remove_set.commands.len);
+                for (remove_set.commands) |command| {
+                    removed_commands.putAssumeCapacity(command.name, {});
+                }
+            }
+        }
+
+        const desired_ext_set: std.StringHashMapUnmanaged(void) = blk: {
+            var desired_ext_set = std.StringHashMapUnmanaged(void){};
+            errdefer desired_ext_set.deinit(allocator);
+
+            try desired_ext_set.ensureUnusedCapacity(allocator, std.math.lossyCast(u32, args.extensions.len));
+            for (args.extensions) |ext_str| desired_ext_set.putAssumeCapacity(ext_str, {});
+
+            break :blk desired_ext_set;
+        };
+        defer {
+            var copy = desired_ext_set;
+            copy.deinit(allocator);
+        }
+
+        for (registry.extensions) |extension| {
+            if (!desired_ext_set.contains(extension.name)) continue;
+            _ = extension.protect; // TODO: Does this matter? Declaration order won't matter, but could it depend on something that isn't explicitly "required"?
+
+            {
+                var support_iter = std.mem.split(u8, extension.supported, "|");
+                while (support_iter.next()) |supported_str| {
+                    const supported_api = std.meta.stringToEnum(gl_targets.Api, supported_str) orelse {
+                        return error.UnrecognizedSupportedApi;
+                    };
+                    if (supported_api == target_feature_set_group.api) {
+                        break;
+                    }
+                } else continue; // the support string doesn't contain the target API, discard it
+            }
+
+            for (extension.require_sets) |require_set| {
+                if (require_set.profile) |set_profile| {
+                    if (set_profile != target_api_profile) continue;
+                }
+
+                try required_types.ensureUnusedCapacity(require_set.types.len);
+                for (require_set.types) |*@"type"| {
+                    required_types.putAssumeCapacity(@"type".name, @"type");
+                }
+
+                try required_enums.ensureUnusedCapacity(require_set.enums.len);
+                for (require_set.enums) |*@"enum"| {
+                    required_enums.putAssumeCapacity(@"enum".name, @"enum");
+                }
+
+                try required_commands.ensureUnusedCapacity(require_set.commands.len);
+                for (require_set.commands) |*command| {
+                    required_commands.putAssumeCapacity(command.name, command);
+                }
+            }
+
+            for (extension.remove_sets) |remove_set| {
+                if (remove_set.profile) |set_profile| {
+                    if (set_profile != target_api_profile) continue;
+                }
+
+                try removed_types.ensureUnusedCapacity(remove_set.types.len);
+                for (remove_set.types) |@"type"| {
+                    removed_types.putAssumeCapacity(@"type".name, {});
+                }
+
+                try removed_enums.ensureUnusedCapacity(remove_set.enums.len);
+                for (remove_set.enums) |@"enum"| {
+                    removed_enums.putAssumeCapacity(@"enum".name, {});
+                }
+
+                try removed_commands.ensureUnusedCapacity(remove_set.commands.len);
+                for (remove_set.commands) |command| {
+                    removed_commands.putAssumeCapacity(command.name, {});
+                }
+            }
+        }
     }
-    try out.writeAll(
-        \\//!
-        \\
-    );
+
+    const EnumValueContext = struct {
+        pub fn hash(self: @This(), s: *const Registry.EnumsSet.Value) u64 {
+            _ = self;
+            return std.hash_map.hashString(s.name);
+        }
+        pub fn eql(self: @This(), a: *const Registry.EnumsSet.Value, b: *const Registry.EnumsSet.Value) bool {
+            _ = self;
+            return std.hash_map.eqlString(a.name, b.name);
+        }
+    };
+    const EnumValueSet = std.HashMap(*const Registry.EnumsSet.Value, void, EnumValueContext, std.hash_map.default_max_load_percentage);
+
+    var all_enums = EnumValueSet.init(allocator);
+    defer all_enums.deinit();
+
+    var enum_groups = std.StringHashMap(EnumValueSet.Unmanaged).init(allocator);
+    defer {
+        var iter = enum_groups.valueIterator();
+        while (iter.next()) |val| val.deinit(allocator);
+        enum_groups.deinit();
+    }
+
+    // collect required enum values
+    for (registry.enum_sets) |enum_set| {
+        for (enum_set.values) |*enumerant| {
+            if (!required_enums.contains(enumerant.name)) continue;
+            try all_enums.putNoClobber(enumerant, {});
+
+            var group_iter = std.mem.split(u8, enumerant.group orelse continue, ",");
+            while (group_iter.next()) |group| {
+                const gop = try enum_groups.getOrPut(group);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{};
+                }
+                try gop.value_ptr.put(allocator, enumerant, {});
+            }
+        }
+    }
+
+    {
+        var lowercase_name_buf = std.ArrayList(u8).init(allocator);
+        defer lowercase_name_buf.deinit();
+
+        var ungrouped_iter = all_enums.keyIterator();
+        while (ungrouped_iter.next()) |val_ptr| {
+            const val: Registry.EnumsSet.Value = val_ptr.*.*;
+
+            assert(std.mem.startsWith(u8, val.name, "GL_"));
+            const deprefixed_name = val.name["GL_".len..];
+
+            try lowercase_name_buf.resize(deprefixed_name.len);
+            const lowercased: []const u8 = std.ascii.lowerString(lowercase_name_buf.items, deprefixed_name);
+
+            try out.writeAll("pub const ");
+            if (!isValidGlobalZigIdentifier(lowercased)) {
+                try out.print("@\"{s}\"", .{lowercased});
+            } else try out.print("{s}", .{lowercased});
+            try out.print(" = {s};\n", .{val.value});
+        }
+
+        var grouped_iter = enum_groups.iterator();
+        while (grouped_iter.next()) |entry| {
+            const group_name = entry.key_ptr.*;
+
+            try out.print("pub const {s} = enum(u32) {{\n", .{group_name});
+            var val_iter = entry.value_ptr.keyIterator();
+            while (val_iter.next()) |val_ptr| {
+                const val: Registry.EnumsSet.Value = val_ptr.*.*;
+                assert(std.mem.startsWith(u8, val.name, "GL_"));
+                const deprefixed_name = val.name["GL_".len..];
+
+                try lowercase_name_buf.resize(deprefixed_name.len);
+                const lowercased: []const u8 = std.ascii.lowerString(lowercase_name_buf.items, deprefixed_name);
+
+                try out.print("    {s} = {s},\n", .{ std.zig.fmtId(lowercased), val.value });
+            }
+            try out.writeAll("};\n");
+        }
+    }
 
     try out_writer_buffered.flush();
+}
+
+inline fn isValidGlobalZigIdentifier(bytes: []const u8) bool {
+    return std.zig.isValidId(bytes) and
+        !std.mem.eql(u8, bytes, "true") and
+        !std.mem.eql(u8, bytes, "false") and
+        !std.mem.eql(u8, bytes, "type") and
+        !std.mem.eql(u8, bytes, "bool");
 }
 
 const Registry = struct {
@@ -1689,6 +1944,9 @@ const Registry = struct {
         api: gl_targets.Api,
         name: gl_targets.Version,
         number: Number,
+        /// > an additional preprocessor token used to protect a feature definition.
+        /// > Usually another feature or extension name. Rarely used, for odd circumstances
+        /// > where the definition of a feature or extension requires another to be defined first.
         protect: ?[]const u8,
         comment: ?[]const u8,
         require_sets: []const FeatureSet,
@@ -1706,6 +1964,9 @@ const Registry = struct {
         }
 
         const FeatureSet = struct {
+            /// > string name of an API profile. Interfaces in the tag are only re-
+            /// > quired (or removed) if the specified profile is being generated. If not specified,
+            /// > interfaces are required (or removed) for all API profiles.
             profile: ?gl_targets.Profile,
             comment: ?[]const u8,
 
@@ -1758,6 +2019,13 @@ const Registry = struct {
         const Number = struct {
             major: u32,
             minor: u32,
+
+            pub fn order(a: Number, b: Number) std.math.Order {
+                return switch (std.math.order(a.major, b.major)) {
+                    inline .lt, .gt => |tag| tag,
+                    .eq => std.math.order(a.minor, b.minor),
+                };
+            }
 
             pub fn parse(src: []const u8) error{
                 NumberMissingSeparator,
