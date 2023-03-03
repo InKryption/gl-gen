@@ -428,6 +428,10 @@ pub fn main() !void {
     var required_commands = std.StringArrayHashMap(*const Registry.FeatureSetGroup.FeatureSet.Command).init(allocator);
     defer required_commands.deinit();
 
+    const target_feature_set_group: Registry.FeatureSetGroup = for (registry.features) |feature_set_group| {
+        if (feature_set_group.name == target_api_version) break feature_set_group;
+    } else return error.RegistryDoesntContainTargetFeatureSet;
+
     { // collect required stuff from target features
         var removed_types = std.StringArrayHashMap(void).init(allocator);
         defer {
@@ -452,10 +456,6 @@ pub fn main() !void {
             }
             removed_commands.deinit();
         }
-
-        const target_feature_set_group: Registry.FeatureSetGroup = for (registry.features) |feature_set_group| {
-            if (feature_set_group.name == target_api_version) break feature_set_group;
-        } else return error.RegistryDoesntContainTargetFeatureSet;
 
         for (registry.features) |feature_set_group| {
             if (feature_set_group.api != target_feature_set_group.api) {
@@ -583,6 +583,159 @@ pub fn main() !void {
             }
         }
     }
+
+    // recognised khronos types
+    const KhronosType = enum {
+        /// signed   8  bit
+        khronos_int8_t,
+        /// unsigned 8  bit
+        khronos_uint8_t,
+        /// signed   16 bit
+        khronos_int16_t,
+        /// unsigned 16 bit
+        khronos_uint16_t,
+        /// signed   32 bit
+        khronos_int32_t,
+        /// unsigned 32 bit
+        khronos_uint32_t,
+        /// signed   64 bit
+        khronos_int64_t,
+        /// unsigned 64 bit
+        khronos_uint64_t,
+        /// signed   same number of bits as a pointer
+        khronos_intptr_t,
+        /// unsigned same number of bits as a pointer
+        khronos_uintptr_t,
+        /// signed   size
+        khronos_ssize_t,
+        /// unsigned size
+        khronos_usize_t,
+        /// signed   32 bit floating point
+        khronos_float_t,
+
+        inline fn bitDepth(khronos_type: @This()) u16 {
+            return switch (khronos_type) {
+                .khronos_int8_t => 8,
+                .khronos_uint8_t => 8,
+                .khronos_int16_t => 16,
+                .khronos_uint16_t => 16,
+                .khronos_int32_t => 32,
+                .khronos_uint32_t => 32,
+                .khronos_int64_t => 64,
+                .khronos_uint64_t => 64,
+                .khronos_intptr_t => @bitSizeOf(*anyopaque),
+                .khronos_uintptr_t => @bitSizeOf(*anyopaque),
+                .khronos_ssize_t => @bitSizeOf(isize),
+                .khronos_usize_t => @bitSizeOf(usize),
+                .khronos_float_t => @bitSizeOf(f32),
+            };
+        }
+    };
+    _ = KhronosType;
+
+    // recognised OpenGL types
+    const OpenGlType = enum {
+        /// A boolean value, either GL_TRUE or GL_FALSE
+        /// Bitdepth: 1+
+        GLboolean,
+        /// Signed, 2's complement binary integer
+        /// Bitdepth: 8
+        /// Common Enum: GL_BYTE
+        GLbyte,
+        /// Unsigned binary integer
+        /// Common Enum: GL_UNSIGNED_BYTE
+        /// Bitdepth: 8
+        GLubyte,
+        /// Signed, 2's complement binary integer
+        /// Common Enum: GL_SHORT
+        /// Bitdepth: 16
+        GLshort,
+        /// Unsigned binary integer
+        /// Common Enum: GL_UNSIGNED_SHORT
+        /// Bitdepth: 16
+        GLushort,
+        /// Signed, 2's complement binary integer
+        /// Common Enum: GL_INT
+        /// Bitdepth: 32
+        GLint,
+        /// Unsigned binary integer
+        /// Common Enum: GL_UNSIGNED_INT
+        /// Bitdepth: 32
+        GLuint,
+        /// Signed, 2's complement 16.16 integer
+        /// Common Enum: GL_FIXED
+        /// Bitdepth: 32
+        GLfixed,
+        /// Signed, 2's complement binary integer
+        /// Bitdepth: 64
+        GLint64,
+        /// Unsigned binary integer
+        /// Bitdepth: 64
+        GLuint64,
+        /// A non-negative binary integer, for sizes.
+        /// Bitdepth: 32
+        GLsizei,
+        /// An OpenGL enumerator value
+        /// Bitdepth: 32
+        GLenum,
+        /// Signed, 2's complement binary integer
+        /// Bitdepth: ptrbits
+        GLintptr,
+        /// Non-negative binary integer size, for memory offsets and ranges
+        /// Bitdepth: ptrbits
+        GLsizeiptr,
+        /// Sync Object handle
+        /// Bitdepth: ptrbits
+        GLsync,
+        /// A bitfield value
+        /// Bitdepth: 32
+        GLbitfield,
+        /// An IEEE-754 floating-point value
+        /// Bitdepth: 16
+        /// Common Enum: GL_HALF_FLOAT
+        GLhalf,
+        /// An IEEE-754 floating-point value
+        /// Bitdepth: 32
+        /// Common Enum: GL_FLOAT
+        GLfloat,
+        /// An IEEE-754 floating-point value, clamped to the range [0,1]
+        /// Bitdepth: 32
+        GLclampf,
+        /// An IEEE-754 floating-point value
+        /// Bitdepth: 64
+        /// Common Enum: GL_DOUBLE
+        GLdouble,
+        /// An IEEE-754 floating-point value, clamped to the range [0,1]
+        /// Bitdepth: 64
+        GLclampd,
+
+        inline fn bitDepth(gl_type: @This()) u16 {
+            return switch (gl_type) {
+                .GLboolean => 1,
+                .GLbyte => 8,
+                .GLubyte => 8,
+                .GLshort => 16,
+                .GLushort => 16,
+                .GLint => 32,
+                .GLuint => 32,
+                .GLfixed => 32,
+                .GLint64 => 64,
+                .GLuint64 => 64,
+                .GLsizei => 32,
+                .GLenum => 32,
+                .GLintptr => @bitSizeOf(*anyopaque),
+                .GLsizeiptr => @bitSizeOf(*anyopaque),
+                .GLsync => @bitSizeOf(*anyopaque),
+                .GLbitfield => 32,
+                .GLhalf => 16,
+                .GLfloat => 32,
+                .GLclampf => 32,
+                .GLdouble => 64,
+                .GLclampd => 64,
+            };
+        }
+    };
+    _ = OpenGlType;
 
     const EnumValueContext = struct {
         pub fn hash(self: @This(), s: *const Registry.EnumsSet.Value) u64 {
