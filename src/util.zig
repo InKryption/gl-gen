@@ -237,6 +237,17 @@ pub fn AnyHashMapFieldContext(
                 return Adapted.eql(.{ .inner = self.inner }, a_field, b);
             }
         }).eql;
+
+        pub fn HashMap(comptime V: type, comptime max_load_percentage: u64) type {
+            assert(!is_array);
+            assert(Hash == u64);
+            return std.HashMap(S, V, Self, max_load_percentage);
+        }
+        pub fn ArrayHashMap(comptime V: type, comptime store_hash: bool) type {
+            assert(is_array);
+            assert(Hash == u32);
+            return std.ArrayHashMap(S, V, Self, store_hash);
+        }
     };
 }
 
