@@ -53,8 +53,7 @@ pub fn build(b: *Build) void {
 
     // with this, the user can just obtain the opengl bindings as a module
     // through `glgen_dep.module("opengl_bindings")`
-    b.addModule(.{
-        .name = "opengl-bindings",
+    _ = b.addModule("opengl-bindings", .{
         .source_file = bindings_src,
         .dependencies = &[_]Build.ModuleDependency{},
     });
