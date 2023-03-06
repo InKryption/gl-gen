@@ -206,65 +206,6 @@ pub fn OneImplicitDeref(comptime T: type) type {
     return T;
 }
 
-pub fn AnyHashMapFieldContextAdapted(
-    comptime S: type,
-    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
-    comptime InnerContext: type,
-    comptime Hash: type,
-    comptime is_array: bool,
-) type {
-    return struct {
-        const Self = @This();
-        inner: InnerContext,
-
-        const Field = std.meta.FieldType(OneImplicitDeref(S), field_id);
-        comptime {
-            std.hash_map.verifyContext(InnerContext, Field, Field, Hash, is_array);
-        }
-
-        pub fn hash(self: Self, key_field: Field) Hash {
-            return self.inner.hash(key_field);
-        }
-        pub const eql = (if (is_array) struct {
-            fn eql(self: Self, a_field: Field, b: S, b_index: usize) bool {
-                const b_field = @field(b, @tagName(field_id));
-                return self.inner.eql(a_field, b_field, b_index);
-            }
-        } else struct {
-            fn eql(self: Self, a_field: Field, b: S) bool {
-                const b_field = @field(b, @tagName(field_id));
-                return self.inner.eql(a_field, b_field);
-            }
-        }).eql;
-    };
-}
-pub fn HashMapFieldContextAdapted(
-    comptime Struct: type,
-    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(Struct)),
-    comptime InnerContext: type,
-) type {
-    return AnyHashMapFieldContextAdapted(
-        Struct,
-        field_id,
-        InnerContext,
-        u64,
-        false,
-    );
-}
-pub fn ArrayHashMapFieldContextAdapted(
-    comptime Struct: type,
-    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(Struct)),
-    comptime InnerContext: type,
-) type {
-    return AnyHashMapFieldContextAdapted(
-        Struct,
-        field_id,
-        InnerContext,
-        u32,
-        true,
-    );
-}
-
 pub fn AnyHashMapFieldContext(
     comptime S: type,
     comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
@@ -298,29 +239,36 @@ pub fn AnyHashMapFieldContext(
         }).eql;
     };
 }
-pub fn HashMapFieldContext(
-    comptime Struct: type,
-    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(Struct)),
+
+fn AnyHashMapFieldContextAdapted(
+    comptime S: type,
+    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
     comptime InnerContext: type,
+    comptime Hash: type,
+    comptime is_array: bool,
 ) type {
-    return AnyHashMapFieldContext(
-        Struct,
-        field_id,
-        InnerContext,
-        u64,
-        false,
-    );
-}
-pub fn ArrayHashMapFieldContext(
-    comptime Struct: type,
-    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(Struct)),
-    comptime InnerContext: type,
-) type {
-    return AnyHashMapFieldContext(
-        Struct,
-        field_id,
-        InnerContext,
-        u32,
-        true,
-    );
+    return struct {
+        const Self = @This();
+        inner: InnerContext,
+
+        const Field = std.meta.FieldType(OneImplicitDeref(S), field_id);
+        comptime {
+            std.hash_map.verifyContext(InnerContext, Field, Field, Hash, is_array);
+        }
+
+        pub fn hash(self: Self, key_field: Field) Hash {
+            return self.inner.hash(key_field);
+        }
+        pub const eql = (if (is_array) struct {
+            fn eql(self: Self, a_field: Field, b: S, b_index: usize) bool {
+                const b_field = @field(b, @tagName(field_id));
+                return self.inner.eql(a_field, b_field, b_index);
+            }
+        } else struct {
+            fn eql(self: Self, a_field: Field, b: S) bool {
+                const b_field = @field(b, @tagName(field_id));
+                return self.inner.eql(a_field, b_field);
+            }
+        }).eql;
+    };
 }
