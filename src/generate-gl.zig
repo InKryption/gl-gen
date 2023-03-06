@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xml = @import("xml.zig");
 const util = @import("util.zig");
 const gl_targets = @import("opengl-targets.zig");
@@ -54,109 +55,6 @@ const KhronosType = enum {
     }
 };
 
-/// recognised OpenGL types
-const OpenGlType = enum {
-    /// A boolean value, either GL_TRUE or GL_FALSE
-    /// Bitdepth: 1+
-    GLboolean,
-    /// Signed, 2's complement binary integer
-    /// Bitdepth: 8
-    /// Common Enum: GL_BYTE
-    GLbyte,
-    /// Unsigned binary integer
-    /// Common Enum: GL_UNSIGNED_BYTE
-    /// Bitdepth: 8
-    GLubyte,
-    /// Signed, 2's complement binary integer
-    /// Common Enum: GL_SHORT
-    /// Bitdepth: 16
-    GLshort,
-    /// Unsigned binary integer
-    /// Common Enum: GL_UNSIGNED_SHORT
-    /// Bitdepth: 16
-    GLushort,
-    /// Signed, 2's complement binary integer
-    /// Common Enum: GL_INT
-    /// Bitdepth: 32
-    GLint,
-    /// Unsigned binary integer
-    /// Common Enum: GL_UNSIGNED_INT
-    /// Bitdepth: 32
-    GLuint,
-    /// Signed, 2's complement 16.16 integer
-    /// Common Enum: GL_FIXED
-    /// Bitdepth: 32
-    GLfixed,
-    /// Signed, 2's complement binary integer
-    /// Bitdepth: 64
-    GLint64,
-    /// Unsigned binary integer
-    /// Bitdepth: 64
-    GLuint64,
-    /// A non-negative binary integer, for sizes.
-    /// Bitdepth: 32
-    GLsizei,
-    /// An OpenGL enumerator value
-    /// Bitdepth: 32
-    GLenum,
-    /// Signed, 2's complement binary integer
-    /// Bitdepth: ptrbits
-    GLintptr,
-    /// Non-negative binary integer size, for memory offsets and ranges
-    /// Bitdepth: ptrbits
-    GLsizeiptr,
-    /// Sync Object handle
-    /// Bitdepth: ptrbits
-    GLsync,
-    /// A bitfield value
-    /// Bitdepth: 32
-    GLbitfield,
-    /// An IEEE-754 floating-point value
-    /// Bitdepth: 16
-    /// Common Enum: GL_HALF_FLOAT
-    GLhalf,
-    /// An IEEE-754 floating-point value
-    /// Bitdepth: 32
-    /// Common Enum: GL_FLOAT
-    GLfloat,
-    /// An IEEE-754 floating-point value, clamped to the range [0,1]
-    /// Bitdepth: 32
-    GLclampf,
-    /// An IEEE-754 floating-point value
-    /// Bitdepth: 64
-    /// Common Enum: GL_DOUBLE
-    GLdouble,
-    /// An IEEE-754 floating-point value, clamped to the range [0,1]
-    /// Bitdepth: 64
-    GLclampd,
-
-    inline fn bitDepth(gl_type: @This()) u16 {
-        return switch (gl_type) {
-            .GLboolean => 1,
-            .GLbyte => 8,
-            .GLubyte => 8,
-            .GLshort => 16,
-            .GLushort => 16,
-            .GLint => 32,
-            .GLuint => 32,
-            .GLfixed => 32,
-            .GLint64 => 64,
-            .GLuint64 => 64,
-            .GLsizei => 32,
-            .GLenum => 32,
-            .GLintptr => @bitSizeOf(*anyopaque),
-            .GLsizeiptr => @bitSizeOf(*anyopaque),
-            .GLsync => @bitSizeOf(*anyopaque),
-            .GLbitfield => 32,
-            .GLhalf => 16,
-            .GLfloat => 32,
-            .GLclampf => 32,
-            .GLdouble => 64,
-            .GLclampd => 64,
-        };
-    }
-};
-
 pub fn main() !void {
     const log = std.log.default;
 
@@ -206,309 +104,6 @@ pub fn main() !void {
         break :reg registry;
     };
     defer registry.deinit(allocator);
-
-    if (false) { // debug print the type decls
-        for (registry.types) |type_entry| {
-            std.debug.print(
-                \\{s}:
-                \\  * requires: {?s}
-                \\  * API: {?s}
-                \\  * comment: {?s}
-                \\  * name in body: {}
-                \\  * C Definition: "
-            , .{
-                type_entry.name,
-                type_entry.requires,
-                if (type_entry.api) |tag| @tagName(tag) else null,
-                type_entry.comment,
-                type_entry.name_in_body,
-            });
-            switch (type_entry.type_def.apientry_indices) {
-                .one => |index| {
-                    std.debug.print("{s}<apientry/>{s}", .{
-                        type_entry.type_def.text[0..index],
-                        type_entry.type_def.text[index..],
-                    });
-                },
-                .many => |indices| {
-                    if (indices.len == 0) {
-                        std.debug.print("{s}", .{type_entry.type_def.text});
-                    } else {
-                        for (indices) |index| {
-                            std.debug.print("{s}<apientry/>", .{type_entry.type_def.text[0..index]});
-                        }
-                        std.debug.print("{s}", .{type_entry.type_def.text[indices[indices.len - 1]..]});
-                    }
-                },
-            }
-            std.debug.print("\"\n\n", .{});
-        }
-    }
-
-    if (false) { // debug print the enum sets
-        for (registry.enum_sets) |set| {
-            std.debug.print(
-                \\ * namespace: {s}
-                \\ * group: {?s}
-                \\ * type: {?s}
-                \\ * vendor: {?s}
-                \\ * range: 
-            , .{
-                set.namespace,
-                set.group,
-                set.type,
-                set.vendor,
-            });
-            if (set.range) |range| {
-                std.debug.print(
-                    \\ {s}...{s}
-                    \\
-                , .{ range.start, range.end orelse range.start });
-            } else {
-                std.debug.print("null\n", .{});
-            }
-
-            std.debug.print(" * values:", .{});
-            if (set.values.len == 0)
-                std.debug.print(" (none)\n", .{})
-            else
-                std.debug.print("\n", .{});
-            for (set.values) |val| {
-                std.debug.print(
-                    \\   + {s} = {s}{s} (alias={?s}, group={?s})
-                    \\
-                , .{
-                    val.name,
-                    val.value,
-                    switch (val.type) {
-                        .none => "",
-                        inline else => |_, tag| @tagName(tag),
-                    },
-                    val.alias,
-                    val.group,
-                });
-            }
-
-            std.debug.print(" * unused ranges:", .{});
-            if (set.unused_ranges.len == 0)
-                std.debug.print(" (none)\n", .{})
-            else
-                std.debug.print("\n", .{});
-            for (set.unused_ranges) |unused_range| {
-                std.debug.print(
-                    \\   + {s}...{s}
-                , .{
-                    unused_range.range.start,
-                    unused_range.range.end orelse unused_range.range.start,
-                });
-                if (unused_range.vendor) |vendor| {
-                    std.debug.print(
-                        \\ ({s})
-                    , .{vendor});
-                }
-                if (unused_range.comment) |comment| {
-                    std.debug.print(
-                        \\: "{s}"
-                    , .{comment});
-                }
-                std.debug.print("\n", .{});
-            }
-
-            std.debug.print("\n", .{});
-        }
-    }
-
-    if (false) { // debug print the commands
-        std.debug.print("Commands (Namespace={s}):\n", .{registry.commands.namespace});
-        for (registry.commands.entries) |cmd| {
-            assert(!cmd.proto.def[cmd.proto.name_index].is_ptype);
-            std.debug.print("   + \"", .{});
-            for (cmd.proto.def, 0..) |component, i| {
-                if (i != 0) std.debug.print(" ", .{});
-                std.debug.print("{s}", .{std.mem.trim(u8, component.text, &[_]u8{ ' ', '\t', '\n', '\r' })});
-            }
-            std.debug.print("\":\n", .{});
-            if (cmd.proto.group) |group| std.debug.print("     - group: {s}\n", .{group});
-
-            if (cmd.comment) |comment| std.debug.print("     - comment: \"{s}\"\n", .{comment});
-            if (cmd.alias) |alias| std.debug.print("     - alias: {s}\n", .{alias});
-            if (cmd.vecequiv) |vecequiv| std.debug.print("     - vecequiv: {s}\n", .{vecequiv});
-
-            std.debug.print("     - params:", .{});
-            if (cmd.params.len == 0)
-                std.debug.print(" (none)\n", .{})
-            else
-                std.debug.print("\n", .{});
-            std.debug.print("", .{});
-            for (cmd.params) |param| {
-                std.debug.print("       º ", .{});
-                for (param.def, 0..) |component, i| {
-                    if (i != 0) std.debug.print(" ", .{});
-                    std.debug.print("{s}", .{std.mem.trim(u8, component.text, &[_]u8{ ' ', '\t', '\n', '\r' })});
-                }
-                if (param.class) |class| std.debug.print(" (class=\"{s}\")", .{class});
-                if (param.group) |group| std.debug.print(" (group=\"{s}\")", .{group});
-                if (param.len) |len| std.debug.print(" (len=\"{s}\")", .{len});
-                std.debug.print("\n", .{});
-            }
-            if (cmd.glx.len != 0) {
-                std.debug.print("     - glx:\n", .{});
-                for (cmd.glx) |info| {
-                    std.debug.print("        º type={s}, opcode={s}", .{ info.type, info.opcode });
-                    if (info.name) |name| std.debug.print(", name=\"{s}\"", .{name});
-                    if (info.comment) |comment| std.debug.print(", comment=\"{s}\"", .{comment});
-                    std.debug.print("\n", .{});
-                }
-            }
-            std.debug.print("\n", .{});
-        }
-    }
-
-    if (false) { // debug print the features
-        for (registry.features) |feature| {
-            std.debug.print(
-                \\Feature ({s}):
-                \\  * API: {s}
-                \\  * Number: {d}.{d}
-                \\
-            , .{
-                @tagName(feature.name),
-                @tagName(feature.api),
-                feature.number.major,
-                feature.number.minor,
-            });
-            if (feature.comment) |comment| {
-                std.debug.print(
-                    \\  * Comment: "{s}"
-                    \\
-                , .{comment});
-            }
-            if (feature.protect) |protect| {
-                std.debug.print(
-                    \\  * Protect: {s}
-                    \\
-                , .{protect});
-            }
-            for ([_][]const Registry.FeatureSetGroup.FeatureSet{ feature.require_sets, feature.remove_sets }, 0..) |set_group, i| {
-                std.debug.print(
-                    \\  * {s} sets:
-                , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
-                if (set_group.len == 0) std.debug.print(" (none)", .{});
-                std.debug.print("\n", .{});
-
-                for (set_group) |set| {
-                    std.debug.print("    º Set:", .{});
-                    if (set.profile) |profile| {
-                        std.debug.print(" profile={s}", .{@tagName(profile)});
-                    }
-                    if (set.comment) |comment| {
-                        if (set.profile != null) std.debug.print(",", .{});
-                        std.debug.print(" comment=\"{s}\"", .{comment});
-                    }
-                    std.debug.print("\n", .{});
-
-                    std.debug.print("      + Commands:", .{});
-                    if (set.commands.len == 0) std.debug.print(" (none)", .{});
-                    std.debug.print("\n", .{});
-                    for (set.commands) |cmd| {
-                        std.debug.print("        - {s}", .{cmd.name});
-                        if (cmd.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
-                        std.debug.print("\n", .{});
-                    }
-
-                    std.debug.print("      + Enums:", .{});
-                    if (set.enums.len == 0) std.debug.print(" (none)", .{});
-                    std.debug.print("\n", .{});
-                    for (set.enums) |enumerant| {
-                        std.debug.print("        - {s}", .{enumerant.name});
-                        if (enumerant.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
-                        std.debug.print("\n", .{});
-                    }
-
-                    std.debug.print("      + Types:", .{});
-                    if (set.types.len == 0) std.debug.print(" (none)", .{});
-                    std.debug.print("\n", .{});
-                    for (set.types) |@"type"| {
-                        std.debug.print("        - {s}", .{@"type".name});
-                        if (@"type".comment) |comment| std.debug.print(": \"{s}\"", .{comment});
-                        std.debug.print("\n", .{});
-                    }
-
-                    std.debug.print("\n", .{});
-                }
-                std.debug.print("\n", .{});
-            }
-        }
-    }
-
-    if (false) { // debug print the extensions
-        for (registry.extensions) |extension| {
-            std.debug.print(
-                \\{s}:
-                \\  + Supported: "{s}"
-                \\
-            , .{
-                extension.name,
-                extension.supported,
-            });
-            if (extension.protect) |protect| std.debug.print("  + Protect: \"{s}\"\n", .{protect});
-            if (extension.comment) |comment| std.debug.print("  + Comment: \"{s}\"\n", .{comment});
-
-            for ([_][]const Registry.Extension.FeatureSet{ extension.require_sets, extension.remove_sets }, 0..) |set_group, i| {
-                std.debug.print(
-                    \\  + {s} sets:
-                , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
-                if (set_group.len == 0) std.debug.print(" (none)", .{});
-                std.debug.print("\n", .{});
-
-                for (set_group) |set| {
-                    std.debug.print("    º Set:", .{});
-                    if (set.api) |api| {
-                        std.debug.print(" API=\"{s}\"", .{@tagName(api)});
-                    }
-                    if (set.profile) |profile| {
-                        if (set.api != null) std.debug.print(",", .{});
-                        std.debug.print(" profile={s}", .{@tagName(profile)});
-                    }
-                    if (set.comment) |comment| {
-                        if (set.profile != null) std.debug.print(",", .{});
-                        std.debug.print(" comment=\"{s}\"", .{comment});
-                    }
-                    std.debug.print("\n", .{});
-
-                    std.debug.print("      + Commands:", .{});
-                    if (set.commands.len == 0) std.debug.print(" (none)", .{});
-                    std.debug.print("\n", .{});
-                    for (set.commands) |cmd| {
-                        std.debug.print("        - {s}", .{cmd.name});
-                        if (cmd.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
-                        std.debug.print("\n", .{});
-                    }
-
-                    std.debug.print("      + Enums:", .{});
-                    if (set.enums.len == 0) std.debug.print(" (none)", .{});
-                    std.debug.print("\n", .{});
-                    for (set.enums) |enumerant| {
-                        std.debug.print("        - {s}", .{enumerant.name});
-                        if (enumerant.comment) |comment| std.debug.print(": \"{s}\"", .{comment});
-                        std.debug.print("\n", .{});
-                    }
-
-                    std.debug.print("      + Types:", .{});
-                    if (set.types.len == 0) std.debug.print(" (none)", .{});
-                    std.debug.print("\n", .{});
-                    for (set.types) |@"type"| {
-                        std.debug.print("        - {s}", .{@"type".name});
-                        if (@"type".comment) |comment| std.debug.print(": \"{s}\"", .{comment});
-                        std.debug.print("\n", .{});
-                    }
-
-                    std.debug.print("\n", .{});
-                }
-            }
-            std.debug.print("\n", .{});
-        }
-    }
 
     const output_file = try std.fs.cwd().createFile(args.output_file_path, .{});
     defer output_file.close();
@@ -569,6 +164,7 @@ pub fn main() !void {
         try out.writeAll(
             \\//!
             \\
+            \\
         );
     }
 
@@ -591,25 +187,25 @@ pub fn main() !void {
         if (feature_set_group.name == target_api_version) break feature_set_group;
     } else return error.RegistryDoesntContainTargetFeatureSet;
 
-    { // collect required stuff from target features
+    { // collect required stuff from target features and extension
         var removed_types = RequiredTypeCtx.ArrayHashMap(void, true).init(allocator);
         defer {
             for (removed_types.keys()) |@"type"|
-                _ = required_types.swapRemoveAdapted(@"type".name, RequiredTypeCtx.Adapted{ .inner = .{} });
+                _ = required_types.swapRemove(@"type");
             removed_types.deinit();
         }
 
         var removed_enums = RequiredEnumCtx.ArrayHashMap(void, true).init(allocator);
         defer {
             for (removed_enums.keys()) |enumerant|
-                _ = required_enums.swapRemoveAdapted(enumerant.name, RequiredEnumCtx.Adapted{ .inner = .{} });
+                _ = required_enums.swapRemove(enumerant);
             removed_enums.deinit();
         }
 
         var removed_commands = RequiredCmdCtx.ArrayHashMap(void, true).init(allocator);
         defer {
             for (removed_commands.keys()) |cmd|
-                _ = required_commands.swapRemoveAdapted(cmd.name, RequiredCmdCtx.Adapted{ .inner = .{} });
+                _ = required_commands.swapRemove(cmd);
             removed_commands.deinit();
         }
 
@@ -639,13 +235,19 @@ pub fn main() !void {
                     if (set.profile != null and set.profile.? != target_api_profile) continue;
 
                     try out_set.types.ensureUnusedCapacity(set.types.len);
-                    for (set.types) |*@"type"| out_set.types.putAssumeCapacity(@"type", {});
+                    for (set.types) |*@"type"| {
+                        out_set.types.putAssumeCapacity(@"type", {});
+                    }
 
                     try out_set.enums.ensureUnusedCapacity(set.enums.len);
-                    for (set.enums) |*enumerant| out_set.enums.putAssumeCapacity(enumerant, {});
+                    for (set.enums) |*enumerant| {
+                        out_set.enums.putAssumeCapacity(enumerant, {});
+                    }
 
                     try out_set.commands.ensureUnusedCapacity(set.commands.len);
-                    for (set.commands) |*command| out_set.commands.putAssumeCapacity(command, {});
+                    for (set.commands) |*command| {
+                        out_set.commands.putAssumeCapacity(command, {});
+                    }
                 }
             }
         }
@@ -751,10 +353,179 @@ pub fn main() !void {
         }
     }
 
-    {
-        var lowercase_name_buf = std.ArrayList(u8).init(allocator);
-        defer lowercase_name_buf.deinit();
+    var lowercase_name_buf = std.ArrayList(u8).init(allocator);
+    defer lowercase_name_buf.deinit();
 
+    { // write types
+        const target = builtin.target; // TODO: maybe make the target a build option through build.zig, separate from the native host?
+
+        const c_scratch_file = try std.fs.cwd().createFile(args.c_scratch_file_path, .{});
+        defer c_scratch_file.close();
+
+        var c_scratch_buffered_writer = std.io.bufferedWriter(c_scratch_file.writer());
+        const c_scratch_writer = c_scratch_buffered_writer.writer();
+
+        const bits_per_byte = try std.math.divExact(u16, target.c_type_bit_size(.int), target.c_type_byte_size(.int));
+        if (bits_per_byte != 8) {
+            log.err("The target byte size is '{d}'.", .{bits_per_byte});
+            return error.WeirdByteSize;
+        }
+
+        try c_scratch_writer.writeAll(
+            \\typedef signed char int8_t;
+            \\typedef unsigned char uint8_t;
+            \\
+        );
+
+        var unsigned_sizes = std.bit_set.ArrayBitSet(usize, 1024).initEmpty();
+        unsigned_sizes.set(8);
+
+        var signed_sizes = std.bit_set.ArrayBitSet(usize, 1024).initEmpty();
+        signed_sizes.set(8);
+
+        for (comptime std.enums.values(std.Target.CType)) |c_type| {
+            const bits = target.c_type_bit_size(c_type);
+
+            switch (c_type) {
+                .short, .int, .long, .longlong => {
+                    if (signed_sizes.isSet(bits)) continue;
+                    signed_sizes.set(bits);
+                },
+                .ushort, .uint, .ulong, .ulonglong => {
+                    if (unsigned_sizes.isSet(bits)) continue;
+                    unsigned_sizes.set(bits);
+                },
+                .float,
+                .double,
+                .longdouble,
+                => continue,
+            }
+
+            switch (c_type) {
+                .short => try c_scratch_writer.print("typedef short int{d}_t;\n", .{bits}),
+                .ushort => try c_scratch_writer.print("typedef unsigned short uint{d}_t;\n", .{bits}),
+                .int => try c_scratch_writer.print("typedef int int{d}_t;\n", .{bits}),
+                .uint => try c_scratch_writer.print("typedef unsigned uint{d}_t;\n", .{bits}),
+                .long => try c_scratch_writer.print("typedef long int{d}_t;\n", .{bits}),
+                .ulong => try c_scratch_writer.print("typedef unsigned long uint{d}_t;\n", .{bits}),
+                .longlong => try c_scratch_writer.print("typedef long long int{d}_t;\n", .{bits}),
+                .ulonglong => try c_scratch_writer.print("typedef unsigned long long uint{d}_t;\n", .{bits}),
+                .float,
+                .double,
+                .longdouble,
+                => continue,
+            }
+        }
+        try c_scratch_writer.print(
+            \\typedef int{0d}_t intptr_t;
+            \\typedef uint{0d}_t uintptr_t;
+            \\
+        , .{@bitSizeOf(*anyopaque)});
+        try c_scratch_writer.writeAll("\n");
+
+        for (comptime std.enums.values(KhronosType)) |khronos_type| {
+            try c_scratch_writer.print("#define {s} ", .{@tagName(khronos_type)});
+            switch (khronos_type) {
+                inline //
+                .khronos_int8_t,
+                .khronos_uint8_t,
+                .khronos_int16_t,
+                .khronos_uint16_t,
+                .khronos_int32_t,
+                .khronos_uint32_t,
+                .khronos_int64_t,
+                .khronos_uint64_t,
+                .khronos_intptr_t,
+                .khronos_uintptr_t,
+                => |tag| try c_scratch_writer.writeAll(@tagName(tag)["khronos_".len..]),
+
+                .khronos_ssize_t => try c_scratch_writer.print("int{d}_t", .{@bitSizeOf(isize)}),
+                .khronos_usize_t => try c_scratch_writer.print("uint{d}_t", .{@bitSizeOf(usize)}),
+                .khronos_float_t => try c_scratch_writer.writeAll("float"),
+            }
+            try c_scratch_writer.writeAll("\n");
+        }
+        try c_scratch_writer.writeAll("\n");
+
+        for (registry.types) |type_entry| {
+            if (!required_types.containsAdapted(type_entry.name, RequiredTypeCtx.Adapted{ .inner = .{} })) continue;
+            if (type_entry.type_def.apientry_indices.len() != 0) {
+                log.err("Required type '{s}' contains API entry/entries - unhandled.\n", .{type_entry.name});
+                continue;
+            }
+
+            try c_scratch_writer.writeAll(type_entry.type_def.text);
+            try c_scratch_writer.writeAll("\n");
+        }
+
+        try c_scratch_buffered_writer.flush();
+
+        const translated_c: [:0]const u8 = blk: {
+            const exec_result = try std.ChildProcess.exec(.{
+                .allocator = allocator,
+                .argv = &[_][]const u8{ args.zig_exe_path, "translate-c", args.c_scratch_file_path },
+            });
+            defer allocator.free(exec_result.stderr);
+            errdefer allocator.free(exec_result.stdout);
+
+            var translated_c = try allocator.realloc(exec_result.stdout, exec_result.stdout.len + 1);
+            translated_c[translated_c.len - 1] = 0;
+            break :blk translated_c[0 .. translated_c.len - 1 :0];
+        };
+        defer allocator.free(translated_c);
+
+        var zig_ast = try std.zig.Ast.parse(allocator, translated_c, .zig);
+        defer zig_ast.deinit(allocator);
+
+        const tokens_tags: []const std.zig.Token.Tag = zig_ast.tokens.items(.tag);
+        for (zig_ast.rootDecls()) |root_decl_index| {
+            const decl_info = zig_ast.fullVarDecl(root_decl_index) orelse continue;
+            const first_tok_index = decl_info.firstToken();
+            assert(tokens_tags[first_tok_index] == .keyword_pub); // this is a translated C file, all the decls should be `pub`.
+            if (tokens_tags[first_tok_index + 1] != .keyword_const) continue;
+            if (tokens_tags[first_tok_index + 2] != .identifier) continue;
+            if (tokens_tags[first_tok_index + 3] != .equal) continue;
+
+            const ident: []const u8 = zig_ast.tokenSlice(first_tok_index + 2);
+            const type_requirement_entry = required_types.getKeyAdapted(ident, RequiredTypeCtx.Adapted{ .inner = .{} }) orelse continue;
+            const type_entry: Registry.TypeEntry = for (registry.types) |type_entry| {
+                if (std.mem.eql(u8, ident, type_entry.name)) break type_entry;
+            } else unreachable;
+
+            const def_node_index = decl_info.ast.init_node;
+            const def_node_first_tok = first_tok_index + 4;
+            const def_node_last_tok = zig_ast.lastToken(def_node_index);
+            assert(def_node_first_tok == zig_ast.firstToken(def_node_index));
+
+            if (type_requirement_entry.comment) |comment| {
+                var comment_line_iter = std.mem.split(u8, comment, &std.ascii.whitespace);
+                while (comment_line_iter.next()) |comment_line| {
+                    try out.print("/// {s}\n", .{comment_line});
+                }
+
+                if (type_entry.comment != null) {
+                    try out.writeAll("///\n");
+                }
+            }
+            if (type_entry.comment) |comment| {
+                var comment_line_iter = std.mem.split(u8, comment, &std.ascii.whitespace);
+                while (comment_line_iter.next()) |comment_line| {
+                    try out.print("/// {s}\n", .{comment_line});
+                }
+            }
+
+            try out.print("pub const {s} =", .{ident});
+            var i = def_node_first_tok;
+            while (i <= def_node_last_tok) : (i += 1) {
+                const tok_slice = zig_ast.tokenSlice(i);
+                try out.print(" {s}", .{tok_slice});
+            }
+            try out.writeAll(";\n");
+        }
+        try out.writeAll("\n");
+    }
+
+    { // write enums
         var ungrouped_iter = all_enums.keyIterator();
         while (ungrouped_iter.next()) |val_ptr| {
             const enumerant: Registry.EnumsSet.Enumerant = val_ptr.*.*;
@@ -789,6 +560,8 @@ pub fn main() !void {
 const GenerationArgs = struct {
     output_file_path: []const u8,
     gl_xml_file_path: []const u8,
+    c_scratch_file_path: []const u8,
+    zig_exe_path: []const u8,
     api_version: gl_targets.Version,
     api_profile: gl_targets.Profile,
     extensions: []const []const u8,
@@ -796,8 +569,10 @@ const GenerationArgs = struct {
     fn deinit(args: GenerationArgs, allocator: std.mem.Allocator) void {
         for (args.extensions) |ext| allocator.free(ext);
         allocator.free(args.extensions);
-        allocator.free(args.output_file_path);
+        allocator.free(args.zig_exe_path);
+        allocator.free(args.c_scratch_file_path);
         allocator.free(args.gl_xml_file_path);
+        allocator.free(args.output_file_path);
     }
 
     fn parse(
@@ -815,12 +590,20 @@ const GenerationArgs = struct {
         var gl_xml_file_path: ?[]u8 = null;
         errdefer allocator.free(gl_xml_file_path orelse "");
 
+        var c_scratch_file_path: ?[]u8 = null;
+        errdefer allocator.free(c_scratch_file_path orelse "");
+
+        var zig_exe_path: ?[]u8 = null;
+        errdefer allocator.free(zig_exe_path orelse "");
+
         var api_version: ?gl_targets.Version = null;
         var api_profile: ?gl_targets.Profile = null;
 
         const ArgName = enum {
             out,
             registry,
+            @"c-scratch",
+            @"zig-exe",
             @"api-version",
             @"api-profile",
         };
@@ -867,6 +650,14 @@ const GenerationArgs = struct {
                 .registry => {
                     gl_xml_file_path = try allocator.realloc(gl_xml_file_path orelse @as([]u8, ""), arg_val.len);
                     std.mem.copy(u8, gl_xml_file_path.?, arg_val);
+                },
+                .@"zig-exe" => {
+                    zig_exe_path = try allocator.realloc(zig_exe_path orelse @as([]u8, ""), arg_val.len);
+                    std.mem.copy(u8, zig_exe_path.?, arg_val);
+                },
+                .@"c-scratch" => {
+                    c_scratch_file_path = try allocator.realloc(c_scratch_file_path orelse @as([]u8, ""), arg_val.len);
+                    std.mem.copy(u8, c_scratch_file_path.?, arg_val);
                 },
                 .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val) orelse {
                     log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}\n", .{
@@ -921,6 +712,8 @@ const GenerationArgs = struct {
         return GenerationArgs{
             .output_file_path = output_file_path.?,
             .gl_xml_file_path = gl_xml_file_path.?,
+            .c_scratch_file_path = c_scratch_file_path.?,
+            .zig_exe_path = zig_exe_path.?,
             .api_version = api_version.?,
             .api_profile = api_profile.?,
             .extensions = extensions,

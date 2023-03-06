@@ -1083,6 +1083,13 @@ pub const TypeEntry = struct {
                     .many => |many| allocator.free(many),
                 }
             }
+
+            pub inline fn len(self: ApientryIndices) usize {
+                return switch (self) {
+                    .one => 1,
+                    .many => |many| many.len,
+                };
+            }
         };
     };
 };
@@ -1342,6 +1349,21 @@ pub const FeatureSetGroup = struct {
                 allocator.free(self.name);
                 allocator.free(self.comment orelse "");
             }
+
+            pub fn format(
+                self: Type,
+                comptime fmt_str: []const u8,
+                options: std.fmt.FormatOptions,
+                writer: anytype,
+            ) @TypeOf(writer).Error!void {
+                _ = fmt_str;
+                _ = options;
+                try writer.print("Type{{ .name = \"{s}\"", .{self.name});
+                if (self.comment) |comment| {
+                    try writer.print(" .comment = \"{s}\"", .{comment});
+                }
+                try writer.writeAll(" }");
+            }
         };
     };
 
@@ -1439,3 +1461,306 @@ pub const Extension = struct {
         pub const Type = FeatureSetGroup.FeatureSet.Type;
     };
 };
+
+pub fn printTypes(registry: Registry, writer: anytype) !void {
+    for (registry.types) |type_entry| {
+        try writer.print(
+            \\{s}:
+            \\  * requires: {?s}
+            \\  * API: {?s}
+            \\  * comment: {?s}
+            \\  * name in body: {}
+            \\  * C Definition: "
+        , .{
+            type_entry.name,
+            type_entry.requires,
+            if (type_entry.api) |tag| @tagName(tag) else null,
+            type_entry.comment,
+            type_entry.name_in_body,
+        });
+        switch (type_entry.type_def.apientry_indices) {
+            .one => |index| {
+                try writer.print("{s}<apientry/>{s}", .{
+                    type_entry.type_def.text[0..index],
+                    type_entry.type_def.text[index..],
+                });
+            },
+            .many => |indices| {
+                if (indices.len == 0) {
+                    try writer.print("{s}", .{type_entry.type_def.text});
+                } else {
+                    for (indices) |index| {
+                        try writer.print("{s}<apientry/>", .{type_entry.type_def.text[0..index]});
+                    }
+                    try writer.print("{s}", .{type_entry.type_def.text[indices[indices.len - 1]..]});
+                }
+            },
+        }
+        try writer.print("\"\n\n", .{});
+    }
+}
+
+pub fn printEnumSets(registry: Registry, writer: anytype) !void {
+    for (registry.enum_sets) |set| {
+        try writer.print(
+            \\ * namespace: {s}
+            \\ * group: {?s}
+            \\ * type: {?s}
+            \\ * vendor: {?s}
+            \\ * range: 
+        , .{
+            set.namespace,
+            set.group,
+            set.type,
+            set.vendor,
+        });
+        if (set.range) |range| {
+            try writer.print(
+                \\ {s}...{s}
+                \\
+            , .{ range.start, range.end orelse range.start });
+        } else {
+            try writer.print("null\n", .{});
+        }
+
+        try writer.print(" * values:", .{});
+        if (set.enumerants.len == 0)
+            try writer.print(" (none)\n", .{})
+        else
+            try writer.print("\n", .{});
+        for (set.enumerants) |val| {
+            try writer.print(
+                \\   + {s} = {s}{s} (alias={?s}, group={?s})
+                \\
+            , .{
+                val.name,
+                val.value,
+                switch (val.type) {
+                    .none => "",
+                    inline else => |_, tag| @tagName(tag),
+                },
+                val.alias,
+                val.group,
+            });
+        }
+
+        try writer.print(" * unused ranges:", .{});
+        if (set.unused_ranges.len == 0)
+            try writer.print(" (none)\n", .{})
+        else
+            try writer.print("\n", .{});
+        for (set.unused_ranges) |unused_range| {
+            try writer.print(
+                \\   + {s}...{s}
+            , .{
+                unused_range.range.start,
+                unused_range.range.end orelse unused_range.range.start,
+            });
+            if (unused_range.vendor) |vendor| {
+                try writer.print(
+                    \\ ({s})
+                , .{vendor});
+            }
+            if (unused_range.comment) |comment| {
+                try writer.print(
+                    \\: "{s}"
+                , .{comment});
+            }
+            try writer.print("\n", .{});
+        }
+
+        try writer.print("\n", .{});
+    }
+}
+
+pub fn printCommands(registry: Registry, writer: anytype) !void {
+    try writer.print("Commands (Namespace={s}):\n", .{registry.commands.namespace});
+    for (registry.commands.entries) |cmd| {
+        assert(!cmd.proto.def[cmd.proto.name_index].is_ptype);
+        try writer.print("   + \"", .{});
+        for (cmd.proto.def, 0..) |component, i| {
+            if (i != 0) try writer.print(" ", .{});
+            try writer.print("{s}", .{std.mem.trim(u8, component.text, &[_]u8{ ' ', '\t', '\n', '\r' })});
+        }
+        try writer.print("\":\n", .{});
+        if (cmd.proto.group) |group| try writer.print("     - group: {s}\n", .{group});
+
+        if (cmd.comment) |comment| try writer.print("     - comment: \"{s}\"\n", .{comment});
+        if (cmd.alias) |alias| try writer.print("     - alias: {s}\n", .{alias});
+        if (cmd.vecequiv) |vecequiv| try writer.print("     - vecequiv: {s}\n", .{vecequiv});
+
+        try writer.print("     - params:", .{});
+        if (cmd.params.len == 0)
+            try writer.print(" (none)\n", .{})
+        else
+            try writer.print("\n", .{});
+        try writer.print("", .{});
+        for (cmd.params) |param| {
+            try writer.print("       º ", .{});
+            for (param.def, 0..) |component, i| {
+                if (i != 0) try writer.print(" ", .{});
+                try writer.print("{s}", .{std.mem.trim(u8, component.text, &[_]u8{ ' ', '\t', '\n', '\r' })});
+            }
+            if (param.class) |class| try writer.print(" (class=\"{s}\")", .{class});
+            if (param.group) |group| try writer.print(" (group=\"{s}\")", .{group});
+            if (param.len) |len| try writer.print(" (len=\"{s}\")", .{len});
+            try writer.print("\n", .{});
+        }
+        if (cmd.glx.len != 0) {
+            try writer.print("     - glx:\n", .{});
+            for (cmd.glx) |info| {
+                try writer.print("        º type={s}, opcode={s}", .{ info.type, info.opcode });
+                if (info.name) |name| try writer.print(", name=\"{s}\"", .{name});
+                if (info.comment) |comment| try writer.print(", comment=\"{s}\"", .{comment});
+                try writer.print("\n", .{});
+            }
+        }
+        try writer.print("\n", .{});
+    }
+}
+
+pub fn printFeatures(registry: Registry, writer: anytype) !void {
+    for (registry.features) |feature| {
+        try writer.print(
+            \\Feature ({s}):
+            \\  * API: {s}
+            \\  * Number: {d}.{d}
+            \\
+        , .{
+            @tagName(feature.name),
+            @tagName(feature.api),
+            feature.number.major,
+            feature.number.minor,
+        });
+        if (feature.comment) |comment| {
+            try writer.print(
+                \\  * Comment: "{s}"
+                \\
+            , .{comment});
+        }
+        if (feature.protect) |protect| {
+            try writer.print(
+                \\  * Protect: {s}
+                \\
+            , .{protect});
+        }
+        for ([_][]const Registry.FeatureSetGroup.FeatureSet{ feature.require_sets, feature.remove_sets }, 0..) |set_group, i| {
+            try writer.print(
+                \\  * {s} sets:
+            , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
+            if (set_group.len == 0) try writer.print(" (none)", .{});
+            try writer.print("\n", .{});
+
+            for (set_group) |set| {
+                try writer.print("    º Set:", .{});
+                if (set.profile) |profile| {
+                    try writer.print(" profile={s}", .{@tagName(profile)});
+                }
+                if (set.comment) |comment| {
+                    if (set.profile != null) try writer.print(",", .{});
+                    try writer.print(" comment=\"{s}\"", .{comment});
+                }
+                try writer.print("\n", .{});
+
+                try writer.print("      + Commands:", .{});
+                if (set.commands.len == 0) try writer.print(" (none)", .{});
+                try writer.print("\n", .{});
+                for (set.commands) |cmd| {
+                    try writer.print("        - {s}", .{cmd.name});
+                    if (cmd.comment) |comment| try writer.print(": \"{s}\"", .{comment});
+                    try writer.print("\n", .{});
+                }
+
+                try writer.print("      + Enums:", .{});
+                if (set.enums.len == 0) try writer.print(" (none)", .{});
+                try writer.print("\n", .{});
+                for (set.enums) |enumerant| {
+                    try writer.print("        - {s}", .{enumerant.name});
+                    if (enumerant.comment) |comment| try writer.print(": \"{s}\"", .{comment});
+                    try writer.print("\n", .{});
+                }
+
+                try writer.print("      + Types:", .{});
+                if (set.types.len == 0) try writer.print(" (none)", .{});
+                try writer.print("\n", .{});
+                for (set.types) |@"type"| {
+                    try writer.print("        - {s}", .{@"type".name});
+                    if (@"type".comment) |comment| try writer.print(": \"{s}\"", .{comment});
+                    try writer.print("\n", .{});
+                }
+
+                try writer.print("\n", .{});
+            }
+            try writer.print("\n", .{});
+        }
+    }
+}
+
+pub fn printExtensions(registry: Registry, writer: anytype) !void {
+    for (registry.extensions) |extension| {
+        try writer.print(
+            \\{s}:
+            \\  + Supported: "{s}"
+            \\
+        , .{
+            extension.name,
+            extension.supported,
+        });
+        if (extension.protect) |protect| try writer.print("  + Protect: \"{s}\"\n", .{protect});
+        if (extension.comment) |comment| try writer.print("  + Comment: \"{s}\"\n", .{comment});
+
+        for ([_][]const Registry.Extension.FeatureSet{ extension.require_sets, extension.remove_sets }, 0..) |set_group, i| {
+            try writer.print(
+                \\  + {s} sets:
+            , .{if (i == 0) "Require" else if (i == 1) "Remove" else unreachable});
+            if (set_group.len == 0) try writer.print(" (none)", .{});
+            try writer.print("\n", .{});
+
+            for (set_group) |set| {
+                try writer.print("    º Set:", .{});
+                if (set.api) |api| {
+                    try writer.print(" API=\"{s}\"", .{@tagName(api)});
+                }
+                if (set.profile) |profile| {
+                    if (set.api != null) try writer.print(",", .{});
+                    try writer.print(" profile={s}", .{@tagName(profile)});
+                }
+                if (set.comment) |comment| {
+                    if (set.profile != null) try writer.print(",", .{});
+                    try writer.print(" comment=\"{s}\"", .{comment});
+                }
+                try writer.print("\n", .{});
+
+                try writer.print("      + Commands:", .{});
+                if (set.commands.len == 0) try writer.print(" (none)", .{});
+                try writer.print("\n", .{});
+                for (set.commands) |cmd| {
+                    try writer.print("        - {s}", .{cmd.name});
+                    if (cmd.comment) |comment| try writer.print(": \"{s}\"", .{comment});
+                    try writer.print("\n", .{});
+                }
+
+                try writer.print("      + Enums:", .{});
+                if (set.enums.len == 0) try writer.print(" (none)", .{});
+                try writer.print("\n", .{});
+                for (set.enums) |enumerant| {
+                    try writer.print("        - {s}", .{enumerant.name});
+                    if (enumerant.comment) |comment| try writer.print(": \"{s}\"", .{comment});
+                    try writer.print("\n", .{});
+                }
+
+                try writer.print("      + Types:", .{});
+                if (set.types.len == 0) try writer.print(" (none)", .{});
+                try writer.print("\n", .{});
+                for (set.types) |@"type"| {
+                    try writer.print("        - {s}", .{@"type".name});
+                    if (@"type".comment) |comment| try writer.print(": \"{s}\"", .{comment});
+                    try writer.print("\n", .{});
+                }
+
+                try writer.print("\n", .{});
+            }
+        }
+        try writer.print("\n", .{});
+    }
+}
