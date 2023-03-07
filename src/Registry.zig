@@ -25,7 +25,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                 return error.TooManyTopLevelCommentElements;
             }
             const elem = tree.children[comment_elem_index].element;
-            if (elem.attributes.len != 0)
+            if (elem.attributes.count() != 0)
                 return error.TopLevelCommentElementHasAttributes;
             if (elem.children.len == 0)
                 return error.EmptyTopLevelCommentElement;
@@ -427,7 +427,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                             };
                             switch (elem_tag) {
                                 .ptype => {
-                                    if (elem.attributes.len != 0)
+                                    if (elem.attributes.count() != 0)
                                         return error.ProtoPTypeElementHasAttributes;
                                     if (elem.children.len == 0)
                                         return error.ProtoPTypeElementIsEmpty;
@@ -441,7 +441,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                                         return error.ProtoHasTooManyNames;
                                     proto_name_index = proto_component_list.items.len;
 
-                                    if (elem.attributes.len != 0)
+                                    if (elem.attributes.count() != 0)
                                         return error.ProtoNameElementHasAttributes;
                                     if (elem.children.len == 0)
                                         return error.ProtoNameElementIsEmpty;
@@ -517,7 +517,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                             };
                             switch (elem_tag) {
                                 .ptype => {
-                                    if (elem.attributes.len != 0)
+                                    if (elem.attributes.count() != 0)
                                         return error.ParamPTypeElementHasAttributes;
                                     if (elem.children.len == 0)
                                         return error.ParamPTypeElementIsEmpty;
@@ -531,7 +531,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                                         return error.ParamHasTooManyNames;
                                     param_name_index = param_component_list.items.len;
 
-                                    if (elem.attributes.len != 0)
+                                    if (elem.attributes.count() != 0)
                                         return error.ParamNameElementHasAttributes;
                                     if (elem.children.len == 0)
                                         return error.ParamNameElementIsEmpty;
@@ -617,7 +617,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                                 };
                             };
 
-                            if (child_elem.attributes.len != 1) return comptime switch (tag) {
+                            if (child_elem.attributes.count() != 1) return comptime switch (tag) {
                                 .alias => error.CommandAliasHasTooManyAttributes,
                                 .vecequiv => error.CommandVecEquivHasTooManyAttributes,
                                 else => unreachable,

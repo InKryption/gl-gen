@@ -12,15 +12,38 @@ pub const Tree = struct {
 };
 pub const Element = struct {
     name: []const u8,
-    attributes: []const Attribute,
+    attributes: Attribute.Set,
     children: []const Child,
 
-    const Attribute = struct {
+    pub const Attribute = struct {
         name: []const u8,
         value: []const u8,
         quote: u8,
+
+        pub const Set = std.ArrayHashMapUnmanaged(Attribute, void, HashCtx, true);
+        pub const HashCtx = struct {
+            pub fn hash(ctx: HashCtx, key: Attribute) u32 {
+                _ = ctx;
+                return Adapted.hash(.{}, key.name);
+            }
+            pub fn eql(ctx: HashCtx, a: Attribute, b: Attribute, b_index: usize) bool {
+                _ = ctx;
+                return Adapted.eql(.{}, a.name, b, b_index);
+            }
+            pub const Adapted = struct {
+                pub fn hash(ctx: Adapted, key_name: []const u8) u32 {
+                    _ = ctx;
+                    return std.array_hash_map.hashString(key_name);
+                }
+                pub fn eql(ctx: Adapted, a_name: []const u8, b: Attribute, b_index: usize) bool {
+                    _ = ctx;
+                    _ = b_index;
+                    return std.mem.eql(u8, a_name, b.name);
+                }
+            };
+        };
     };
-    const Child = union(enum) {
+    pub const Child = union(enum) {
         element: Element,
         text: []const u8,
         comment: []const u8,
@@ -32,16 +55,11 @@ pub const Element = struct {
     }
 
     pub fn getAttribute(elem: Element, name: []const u8) ?Attribute {
-        const index = elem.getAttributeIndex(name) orelse return null;
-        return elem.attributes[index];
+        return elem.attributes.getKeyAdapted(name, Attribute.HashCtx.Adapted{});
     }
 
     pub fn getAttributeIndex(elem: Element, name: []const u8) ?usize {
-        for (elem.attributes, 0..) |attr, index| {
-            if (!std.mem.eql(u8, attr.name, name)) continue;
-            return index;
-        }
-        return null;
+        return elem.attributes.getIndexAdapted(name, Attribute.HashCtx.Adapted{});
     }
 
     /// Same as `getTextIndex`, but returns the text data directly.
@@ -269,6 +287,8 @@ pub fn parse(
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
+    var string_intern = StringIntern.init(allocator);
+
     var state: enum {
         start,
         left_angle_bracket,
@@ -279,7 +299,7 @@ pub fn parse(
     var element_stack = try std.ArrayList(Element).initCapacity(child_allocator, 8);
     defer element_stack.deinit();
 
-    var attributes_buf = try std.ArrayList(Element.Attribute).initCapacity(child_allocator, 8);
+    var attributes_buf = Element.Attribute.Set.Managed.init(child_allocator);
     defer attributes_buf.deinit();
 
     var element_name_buf = try std.ArrayList(u8).initCapacity(child_allocator, 64);
@@ -359,7 +379,7 @@ pub fn parse(
                         break subsequent_cp;
                     } else return error.EndOfStream;
 
-                    assert(attributes_buf.items.len == 0);
+                    assert(attributes_buf.count() == 0);
 
                     var latest_cp = elem_name_sentinel;
                     while (true) {
@@ -400,12 +420,15 @@ pub fn parse(
                                     _ = try util.writeCodepointUtf8(attr_data_buf.writer(), str_cp);
                                 } else return error.EndOfStream;
 
-                                const attr_data_dupe = try allocator.dupe(u8, attr_data_buf.items);
-                                try attributes_buf.append(Element.Attribute{
+                                const attr_data_dupe: []const u8 = try string_intern.get(attr_data_buf.items);
+                                const attr_gop = try attributes_buf.getOrPutAdapted(attr_data_dupe[0..attr_value_start], Element.Attribute.HashCtx.Adapted{});
+                                if (attr_gop.found_existing) return error.DuplicateAttribute;
+                                attr_gop.key_ptr.* = Element.Attribute{
                                     .name = attr_data_dupe[0..attr_value_start],
                                     .value = attr_data_dupe[attr_value_start..],
                                     .quote = quote_char,
-                                });
+                                };
+                                attr_gop.value_ptr.* = {};
                                 latest_cp = try ((try util.readCodepointUtf8(reader)) orelse error.EndOfStream);
                             },
                             '/' => {
@@ -416,31 +439,13 @@ pub fn parse(
                                         else => error.ExpectedRightAngleBracketAfterSlash,
                                     };
 
-                                    const new_elem: Element = blk: {
-                                        var alloc_size: usize = 0;
-                                        alloc_size += attributes_buf.items.len * @sizeOf(Element.Attribute);
-                                        alloc_size += element_name_buf.items.len * @sizeOf(u8);
-
-                                        const single_alloc = try allocator.alignedAlloc(u8, @alignOf(Element.Attribute), alloc_size);
-
-                                        var fba_state = std.heap.FixedBufferAllocator.init(single_alloc);
-                                        const fba = fba_state.allocator();
-
-                                        const attributes_slice = fba.alloc(Element.Attribute, attributes_buf.items.len) catch unreachable;
-                                        std.mem.copy(Element.Attribute, attributes_slice, attributes_buf.items);
-                                        attributes_buf.shrinkRetainingCapacity(0);
-
-                                        const element_name_slice = fba.dupe(u8, element_name_buf.items) catch unreachable;
-                                        element_name_buf.shrinkRetainingCapacity(0);
-
-                                        assert(fba_state.end_index == fba_state.buffer.len);
-
-                                        break :blk Element{
-                                            .name = element_name_slice,
-                                            .attributes = attributes_slice,
-                                            .children = &.{},
-                                        };
+                                    const new_elem: Element = Element{
+                                        .name = try string_intern.get(element_name_buf.items),
+                                        .attributes = (try attributes_buf.cloneWithAllocator(allocator)).unmanaged,
+                                        .children = &.{},
                                     };
+                                    element_name_buf.shrinkRetainingCapacity(0);
+                                    attributes_buf.shrinkRetainingCapacity(0);
 
                                     // no parent in the stack to unwind,
                                     // so this is the only element.
@@ -461,31 +466,13 @@ pub fn parse(
                             },
                             '>' => {
                                 if (element_name_buf.items.len == 0) return error.ElementMissingName;
-                                const new_elem: Element = blk: {
-                                    var alloc_size: usize = 0;
-                                    alloc_size += attributes_buf.items.len * @sizeOf(Element.Attribute);
-                                    alloc_size += element_name_buf.items.len * @sizeOf(u8);
-
-                                    const single_alloc = try allocator.alignedAlloc(u8, @alignOf(Element.Attribute), alloc_size);
-
-                                    var fba_state = std.heap.FixedBufferAllocator.init(single_alloc);
-                                    const fba = fba_state.allocator();
-
-                                    const attributes_slice = fba.alloc(Element.Attribute, attributes_buf.items.len) catch unreachable;
-                                    std.mem.copy(Element.Attribute, attributes_slice, attributes_buf.items);
-                                    attributes_buf.shrinkRetainingCapacity(0);
-
-                                    const element_name_slice = fba.dupe(u8, element_name_buf.items) catch unreachable;
-                                    element_name_buf.shrinkRetainingCapacity(0);
-
-                                    assert(fba_state.end_index == fba_state.buffer.len);
-
-                                    break :blk Element{
-                                        .name = element_name_slice,
-                                        .attributes = attributes_slice,
-                                        .children = &.{},
-                                    };
+                                const new_elem: Element = Element{
+                                    .name = try string_intern.get(element_name_buf.items),
+                                    .attributes = (try attributes_buf.cloneWithAllocator(allocator)).unmanaged,
+                                    .children = &.{},
                                 };
+                                element_name_buf.shrinkRetainingCapacity(0);
+                                attributes_buf.shrinkRetainingCapacity(0);
                                 try element_stack.append(new_elem);
                                 state = .content;
                                 continue :mainloop;
@@ -528,7 +515,7 @@ pub fn parse(
                             const parent: *Element = &element_stack.items[element_stack.items.len - 1];
                             parent.children = try allocator.realloc(@constCast(parent.children), parent.children.len + 1);
                             @constCast(&parent.children[parent.children.len - 1]).* = .{
-                                .comment = try allocator.dupe(u8, content_buf.items),
+                                .comment = try string_intern.get(content_buf.items),
                             };
                             content_buf.shrinkRetainingCapacity(0);
                         }
@@ -555,7 +542,7 @@ pub fn parse(
                                 const parent: *Element = &element_stack.items[element_stack.items.len - 1];
                                 parent.children = try allocator.realloc(@constCast(parent.children), parent.children.len + 1);
                                 @constCast(&parent.children[parent.children.len - 1]).* = .{
-                                    .text = try allocator.dupe(u8, content_buf.items),
+                                    .text = try string_intern.get(content_buf.items),
                                 };
                                 content_buf.shrinkRetainingCapacity(0);
                             }
@@ -643,6 +630,35 @@ pub fn parse(
         }
     } else return error.EndOfStream;
 }
+
+const StringIntern = struct {
+    allocator: std.mem.Allocator,
+    set: std.StringHashMapUnmanaged(void) = .{},
+
+    inline fn init(allocator: std.mem.Allocator) StringIntern {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *StringIntern) void {
+        var iter = self.set.keyIterator();
+        while (iter.next()) |str| {
+            self.allocator.free(str.*);
+        }
+        self.set.deinit(self.allocator);
+    }
+
+    fn get(self: *StringIntern, str: []const u8) ![]const u8 {
+        const gop = try self.set.getOrPut(self.allocator, str);
+        if (!gop.found_existing) {
+            // this is fine, because the string contents are identical,
+            // so the hash will remain identical
+            gop.key_ptr.* = try self.allocator.dupe(u8, str);
+        }
+        return gop.key_ptr.*;
+    }
+};
 
 /// Skips codepoints considered whitespace in XML, returning
 /// the first non-whitespace codepoint encountered (or null)
