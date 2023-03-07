@@ -8,62 +8,14 @@ const GenerationArgs = @import("GenerationArgs.zig");
 const Registry = @import("Registry.zig");
 const assert = std.debug.assert;
 
-/// recognised khronos types
-const KhronosType = enum {
-    /// signed   8  bit
-    khronos_int8_t,
-    /// unsigned 8  bit
-    khronos_uint8_t,
-    /// signed   16 bit
-    khronos_int16_t,
-    /// unsigned 16 bit
-    khronos_uint16_t,
-    /// signed   32 bit
-    khronos_int32_t,
-    /// unsigned 32 bit
-    khronos_uint32_t,
-    /// signed   64 bit
-    khronos_int64_t,
-    /// unsigned 64 bit
-    khronos_uint64_t,
-    /// signed   same number of bits as a pointer
-    khronos_intptr_t,
-    /// unsigned same number of bits as a pointer
-    khronos_uintptr_t,
-    /// signed   size
-    khronos_ssize_t,
-    /// unsigned size
-    khronos_usize_t,
-    /// signed   32 bit floating point
-    khronos_float_t,
-
-    inline fn bitDepth(khronos_type: @This()) u16 {
-        return switch (khronos_type) {
-            .khronos_int8_t => 8,
-            .khronos_uint8_t => 8,
-            .khronos_int16_t => 16,
-            .khronos_uint16_t => 16,
-            .khronos_int32_t => 32,
-            .khronos_uint32_t => 32,
-            .khronos_int64_t => 64,
-            .khronos_uint64_t => 64,
-            .khronos_intptr_t => @bitSizeOf(*anyopaque),
-            .khronos_uintptr_t => @bitSizeOf(*anyopaque),
-            .khronos_ssize_t => @bitSizeOf(isize),
-            .khronos_usize_t => @bitSizeOf(usize),
-            .khronos_float_t => @bitSizeOf(f32),
-        };
-    }
-};
-
 pub fn main() !void {
     const log = std.log.default;
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 16 }){};
-    defer _ = gpa.deinit();
+    // var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 16 }){};
+    // defer _ = gpa.deinit();
 
-    const allocator = gpa.allocator();
-    // const allocator = std.heap.c_allocator;
+    // const allocator = gpa.allocator();
+    const allocator = std.heap.c_allocator;
 
     const args: GenerationArgs = args: {
         var args_iter = try std.process.argsWithAllocator(allocator);
@@ -381,51 +333,50 @@ pub fn main() !void {
             \\
         );
 
-        var unsigned_sizes = std.bit_set.ArrayBitSet(usize, 1024).initEmpty();
-        unsigned_sizes.set(8);
-
-        var signed_sizes = std.bit_set.ArrayBitSet(usize, 1024).initEmpty();
-        signed_sizes.set(8);
-
-        for (comptime std.enums.values(std.Target.CType)) |c_type| {
-            const bits = target.c_type_bit_size(c_type);
-
-            switch (c_type) {
-                .short, .int, .long, .longlong => {
-                    if (signed_sizes.isSet(bits)) continue;
-                    signed_sizes.set(bits);
-                },
-                .ushort, .uint, .ulong, .ulonglong => {
-                    if (unsigned_sizes.isSet(bits)) continue;
-                    unsigned_sizes.set(bits);
-                },
-                .float,
-                .double,
-                .longdouble,
-                => continue,
-            }
-
-            switch (c_type) {
-                .short => try c_scratch_writer.print("typedef short int{d}_t;\n", .{bits}),
-                .ushort => try c_scratch_writer.print("typedef unsigned short uint{d}_t;\n", .{bits}),
-                .int => try c_scratch_writer.print("typedef int int{d}_t;\n", .{bits}),
-                .uint => try c_scratch_writer.print("typedef unsigned uint{d}_t;\n", .{bits}),
-                .long => try c_scratch_writer.print("typedef long int{d}_t;\n", .{bits}),
-                .ulong => try c_scratch_writer.print("typedef unsigned long uint{d}_t;\n", .{bits}),
-                .longlong => try c_scratch_writer.print("typedef long long int{d}_t;\n", .{bits}),
-                .ulonglong => try c_scratch_writer.print("typedef unsigned long long uint{d}_t;\n", .{bits}),
-                .float,
-                .double,
-                .longdouble,
-                => continue,
+        for (1..4) |int_bit_size_log2| {
+            for (comptime std.enums.values(std.builtin.Signedness)) |signedness| {
+                const int_bit_size = @as(u16, 8) << @intCast(u2, int_bit_size_log2);
+                const c_type = bitSizeToCIntType(target, int_bit_size, signedness) orelse continue;
+                try c_scratch_writer.print("typedef {} {s}{d}_t;\n", .{
+                    fmtCType(c_type),
+                    switch (signedness) {
+                        .signed => "int",
+                        .unsigned => "uint",
+                    },
+                    target.c_type_bit_size(c_type),
+                });
             }
         }
+
         try c_scratch_writer.print(
             \\typedef int{0d}_t intptr_t;
             \\typedef uint{0d}_t uintptr_t;
             \\
-        , .{@bitSizeOf(*anyopaque)});
+        , .{target.cpu.arch.ptrBitWidth()});
         try c_scratch_writer.writeAll("\n");
+
+        // recognised khronos types
+        const KhronosType = enum {
+            khronos_int8_t,
+            khronos_uint8_t,
+            khronos_int16_t,
+            khronos_uint16_t,
+            khronos_int32_t,
+            khronos_uint32_t,
+            khronos_int64_t,
+            khronos_uint64_t,
+
+            /// signed   same number of bits as a pointer
+            khronos_intptr_t,
+            /// unsigned same number of bits as a pointer
+            khronos_uintptr_t,
+            /// signed   size
+            khronos_ssize_t,
+            /// unsigned size
+            khronos_usize_t,
+            /// signed   32 bit floating point
+            khronos_float_t,
+        };
 
         for (comptime std.enums.values(KhronosType)) |khronos_type| {
             try c_scratch_writer.print("#define {s} ", .{@tagName(khronos_type)});
@@ -443,9 +394,12 @@ pub fn main() !void {
                 .khronos_uintptr_t,
                 => |tag| try c_scratch_writer.writeAll(@tagName(tag)["khronos_".len..]),
 
-                .khronos_ssize_t => try c_scratch_writer.print("int{d}_t", .{@bitSizeOf(isize)}),
-                .khronos_usize_t => try c_scratch_writer.print("uint{d}_t", .{@bitSizeOf(usize)}),
-                .khronos_float_t => try c_scratch_writer.writeAll("float"),
+                .khronos_ssize_t => try c_scratch_writer.print("int{d}_t", .{target.cpu.arch.ptrBitWidth()}), // NOTE: Zig assumes pointer bits == size bits,
+                .khronos_usize_t => try c_scratch_writer.print("uint{d}_t", .{target.cpu.arch.ptrBitWidth()}), // and that's probably true for most targets that support OpenGL
+                .khronos_float_t => {
+                    assert(target.c_type_bit_size(.float) == 32); // TODO: Maybe add logic for this?
+                    try c_scratch_writer.writeAll("float");
+                },
             }
             try c_scratch_writer.writeAll("\n");
         }
@@ -491,7 +445,7 @@ pub fn main() !void {
             if (tokens_tags[first_tok_index + 3] != .equal) continue;
 
             const ident: []const u8 = zig_ast.tokenSlice(first_tok_index + 2);
-            const type_requirement_entry = required_types.getKeyAdapted(ident, RequiredTypeCtx.Adapted{ .inner = .{} }) orelse continue;
+            if (!required_types.containsAdapted(ident, RequiredTypeCtx.Adapted{ .inner = .{} })) continue;
             const type_entry: Registry.TypeEntry = for (registry.types) |type_entry| {
                 if (std.mem.eql(u8, ident, type_entry.name)) break type_entry;
             } else unreachable;
@@ -501,16 +455,6 @@ pub fn main() !void {
             const def_node_last_tok = zig_ast.lastToken(def_node_index);
             assert(def_node_first_tok == zig_ast.firstToken(def_node_index));
 
-            if (type_requirement_entry.comment) |comment| {
-                var comment_line_iter = std.mem.split(u8, comment, &std.ascii.whitespace);
-                while (comment_line_iter.next()) |comment_line| {
-                    try out.print("/// {s}\n", .{comment_line});
-                }
-
-                if (type_entry.comment != null) {
-                    try out.writeAll("///\n");
-                }
-            }
             if (type_entry.comment) |comment| {
                 var comment_line_iter = std.mem.split(u8, comment, &std.ascii.whitespace);
                 while (comment_line_iter.next()) |comment_line| {
@@ -560,3 +504,57 @@ pub fn main() !void {
 
     try out_writer_buffered.flush();
 }
+
+inline fn cIntTypeSignedness(c_type: std.Target.CType) ?std.builtin.Signedness {
+    return switch (c_type) {
+        .ushort, .uint, .ulong, .ulonglong => .unsigned,
+        .short, .int, .long, .longlong => .signed,
+        .float, .double, .longdouble => null,
+    };
+}
+
+inline fn bitSizeToCIntType(
+    target: std.Target,
+    bit_size: u16,
+    signedness: std.builtin.Signedness,
+) ?std.Target.CType {
+    for (comptime std.enums.values(std.Target.CType)) |c_type| {
+        const c_type_signedness = cIntTypeSignedness(c_type) orelse continue; // non-integers don't count
+        const c_type_bits = target.c_type_bit_size(c_type);
+
+        if (c_type_signedness != signedness) continue;
+        if (c_type_bits != bit_size) continue;
+        return c_type;
+    }
+    return null;
+}
+
+inline fn fmtCType(c_type: std.Target.CType) FmtCType {
+    return .{ .c_type = c_type };
+}
+const FmtCType = struct {
+    c_type: std.Target.CType,
+
+    pub fn format(
+        self: FmtCType,
+        comptime fmt_str: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt_str;
+        _ = options;
+        try writer.writeAll(switch (self.c_type) {
+            .short => "short",
+            .ushort => "unsigned short",
+            .int => "int",
+            .uint => "unsigned",
+            .long => "long",
+            .ulong => "unsigned long",
+            .longlong => "long long",
+            .ulonglong => "unsigned long long",
+            .float => "float",
+            .double => "double",
+            .longdouble => "long double",
+        });
+    }
+};
