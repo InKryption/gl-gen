@@ -45,12 +45,6 @@ pub fn build(b: *Build) void {
     generate_bindings.addArg("--out");
     const bindings_src = generate_bindings.addOutputFileArg("gl.zig");
 
-    generate_bindings.addArg("--c-scratch");
-    _ = generate_bindings.addOutputFileArg("types.h");
-
-    generate_bindings.addArg("--zig-exe");
-    generate_bindings.addArg(b.zig_exe);
-
     // make sure to add extension arguments afterwards if any are provided
     if (b.option([]const []const u8, "extensions", "List of extension names to filter for")) |extensions| {
         generate_bindings.addArg("--");

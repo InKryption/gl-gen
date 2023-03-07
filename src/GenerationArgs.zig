@@ -7,17 +7,13 @@ const assert = std.debug.assert;
 const GenerationArgs = @This();
 output_file_path: []const u8,
 gl_xml_file_path: []const u8,
-c_scratch_file_path: []const u8,
-zig_exe_path: []const u8,
 api_version: gl_targets.Version,
 api_profile: gl_targets.Profile,
-extensions: []const []const u8,
+extensions: std.StringArrayHashMapUnmanaged(void),
 
 const ArgName = enum {
     out,
     registry,
-    @"c-scratch",
-    @"zig-exe",
     @"api-version",
     @"api-profile",
 };
@@ -25,11 +21,10 @@ comptime {
     assert(@typeInfo(ArgName).Enum.fields.len == @typeInfo(GenerationArgs).Struct.fields.len - 1);
 }
 
-pub fn deinit(args: GenerationArgs, allocator: std.mem.Allocator) void {
-    for (args.extensions) |ext| allocator.free(ext);
-    allocator.free(args.extensions);
-    allocator.free(args.zig_exe_path);
-    allocator.free(args.c_scratch_file_path);
+pub fn deinit(const_args: GenerationArgs, allocator: std.mem.Allocator) void {
+    var args = const_args;
+    for (args.extensions.keys()) |ext| allocator.free(ext);
+    args.extensions.deinit(allocator);
     allocator.free(args.gl_xml_file_path);
     allocator.free(args.output_file_path);
 }
@@ -49,20 +44,14 @@ pub fn parse(
     var gl_xml_file_path: ?[]u8 = null;
     errdefer allocator.free(gl_xml_file_path orelse "");
 
-    var c_scratch_file_path: ?[]u8 = null;
-    errdefer allocator.free(c_scratch_file_path orelse "");
-
-    var zig_exe_path: ?[]u8 = null;
-    errdefer allocator.free(zig_exe_path orelse "");
-
     var api_version: ?gl_targets.Version = null;
     var api_profile: ?gl_targets.Profile = null;
+
     var present = std.EnumSet(ArgName).initEmpty();
 
-    const whitespace_chars = [_]u8{ ' ', '\t', '\n', '\r' };
     while (true) {
         const arg_name: ArgName = blk: {
-            const arg_start = std.mem.trim(u8, checkResult(args_iter.next()) orelse break, &whitespace_chars);
+            const arg_start = std.mem.trim(u8, checkResult(args_iter.next()) orelse break, &std.ascii.whitespace);
             if (std.mem.eql(u8, arg_start, "--")) break;
 
             if (!std.mem.startsWith(u8, arg_start, "--")) {
@@ -83,7 +72,7 @@ pub fn parse(
 
             break :blk tag;
         };
-        const arg_val: []const u8 = if (checkResult(args_iter.next())) |arg_val| std.mem.trim(u8, arg_val, &whitespace_chars) else {
+        const arg_val: []const u8 = if (checkResult(args_iter.next())) |arg_val| std.mem.trim(u8, arg_val, &std.ascii.whitespace) else {
             log.err("Expected argument key value pairs of the form '--<name> <value>'.\n", .{});
             break;
         };
@@ -101,14 +90,6 @@ pub fn parse(
                 gl_xml_file_path = try allocator.realloc(gl_xml_file_path orelse @as([]u8, ""), arg_val.len);
                 std.mem.copy(u8, gl_xml_file_path.?, arg_val);
             },
-            .@"zig-exe" => {
-                zig_exe_path = try allocator.realloc(zig_exe_path orelse @as([]u8, ""), arg_val.len);
-                std.mem.copy(u8, zig_exe_path.?, arg_val);
-            },
-            .@"c-scratch" => {
-                c_scratch_file_path = try allocator.realloc(c_scratch_file_path orelse @as([]u8, ""), arg_val.len);
-                std.mem.copy(u8, c_scratch_file_path.?, arg_val);
-            },
             .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val) orelse {
                 log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}\n", .{
                     util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Version), .{
@@ -117,7 +98,6 @@ pub fn parse(
                         .element_suffix = "\",",
                     }),
                 });
-
                 return error.UnrecognisedApiVersion;
             },
             .@"api-profile" => api_profile = std.meta.stringToEnum(gl_targets.Profile, arg_val) orelse {
@@ -141,29 +121,39 @@ pub fn parse(
         if (missing.count() != 0) return error.MissingArguments;
     }
 
-    const extensions: []const []const u8 = blk: {
-        var extensions = std.ArrayList([]const u8).init(allocator);
-        defer extensions.deinit();
-        errdefer for (extensions.items) |ext_name| {
-            allocator.free(ext_name);
-        };
+    // const extensions: []const []const u8 = blk: {
+    //     var extensions = std.ArrayList([]const u8).init(allocator);
+    //     defer extensions.deinit();
+    //     errdefer for (extensions.items) |ext_name| {
+    //         allocator.free(ext_name);
+    //     };
 
-        while (checkResult(args_iter.next())) |ext_name| {
-            try extensions.append(try allocator.dupe(u8, std.mem.trim(u8, ext_name, &whitespace_chars)));
+    //     while (checkResult(args_iter.next())) |ext_name| {
+    //         try extensions.append(try allocator.dupe(u8, std.mem.trim(u8, ext_name, &std.ascii.whitespace)));
+    //     }
+
+    //     break :blk try extensions.toOwnedSlice();
+    // };
+    // errdefer {
+    //     for (extensions) |ext| allocator.free(ext);
+    //     allocator.free(extensions);
+    // }
+    var extensions = std.StringArrayHashMapUnmanaged(void){};
+    errdefer extensions.deinit(allocator);
+    errdefer for (extensions.keys()) |ext| allocator.free(ext);
+
+    while (checkResult(args_iter.next())) |ext_name| {
+        try extensions.put(allocator, ext_name, {});
+        const gop = try extensions.getOrPut(allocator, ext_name);
+        gop.value_ptr.* = {};
+        if (gop.found_existing) {
+            log.warn("Specified extensions '{s}' multiple times.", .{gop.key_ptr.*});
         }
-
-        break :blk try extensions.toOwnedSlice();
-    };
-    errdefer {
-        for (extensions) |ext| allocator.free(ext);
-        allocator.free(extensions);
     }
 
     return GenerationArgs{
         .output_file_path = output_file_path.?,
         .gl_xml_file_path = gl_xml_file_path.?,
-        .c_scratch_file_path = c_scratch_file_path.?,
-        .zig_exe_path = zig_exe_path.?,
         .api_version = api_version.?,
         .api_profile = api_profile.?,
         .extensions = extensions,

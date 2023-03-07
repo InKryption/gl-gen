@@ -81,10 +81,10 @@ pub fn main() !void {
             @tagName(target_api_profile),
         });
 
-        if (args.extensions.len == 0) {
+        if (args.extensions.count() == 0) {
             try out.writeAll("(none)\n");
         } else {
-            for (args.extensions, 0..) |ext, i| {
+            for (args.extensions.keys(), 0..) |ext, i| {
                 if (i != 0) try out.writeAll(", ");
                 try out.print("\"{s}\"", .{ext});
             }
@@ -209,8 +209,8 @@ pub fn main() !void {
             var desired_ext_set = std.StringHashMapUnmanaged(void){};
             errdefer desired_ext_set.deinit(allocator);
 
-            try desired_ext_set.ensureUnusedCapacity(allocator, std.math.lossyCast(u32, args.extensions.len));
-            for (args.extensions) |ext_str| desired_ext_set.putAssumeCapacity(ext_str, {});
+            try desired_ext_set.ensureUnusedCapacity(allocator, std.math.lossyCast(u32, args.extensions.count()));
+            for (args.extensions.keys()) |ext_str| desired_ext_set.putAssumeCapacity(ext_str, {});
 
             break :blk desired_ext_set;
         };
@@ -311,167 +311,6 @@ pub fn main() !void {
 
     // don't need GLvoid
     _ = required_types.swapRemoveAdapted(@as([]const u8, "GLvoid"), RequiredTypeCtx.Adapted{ .inner = .{} });
-
-    { // write types
-        const target = builtin.target; // TODO: maybe make the target a build option through build.zig, separate from the native host?
-
-        const c_scratch_file = try std.fs.cwd().createFile(args.c_scratch_file_path, .{});
-        defer c_scratch_file.close();
-
-        var c_scratch_buffered_writer = std.io.bufferedWriter(c_scratch_file.writer());
-        const c_scratch_writer = c_scratch_buffered_writer.writer();
-
-        const bits_per_byte = try std.math.divExact(u16, target.c_type_bit_size(.int), target.c_type_byte_size(.int));
-        if (bits_per_byte != 8) {
-            log.err("The target byte size is '{d}'.", .{bits_per_byte});
-            return error.WeirdByteSize;
-        }
-
-        try c_scratch_writer.writeAll(
-            \\typedef signed char int8_t;
-            \\typedef unsigned char uint8_t;
-            \\
-        );
-
-        for (1..4) |int_bit_size_log2| {
-            for (comptime std.enums.values(std.builtin.Signedness)) |signedness| {
-                const int_bit_size = @as(u16, 8) << @intCast(u2, int_bit_size_log2);
-                const c_type = bitSizeToCIntType(target, int_bit_size, signedness) orelse continue;
-                try c_scratch_writer.print("typedef {} {s}{d}_t;\n", .{
-                    fmtCType(c_type),
-                    switch (signedness) {
-                        .signed => "int",
-                        .unsigned => "uint",
-                    },
-                    target.c_type_bit_size(c_type),
-                });
-            }
-        }
-
-        try c_scratch_writer.print(
-            \\typedef int{0d}_t intptr_t;
-            \\typedef uint{0d}_t uintptr_t;
-            \\
-        , .{target.cpu.arch.ptrBitWidth()});
-        try c_scratch_writer.writeAll("\n");
-
-        // recognised khronos types
-        const KhronosType = enum {
-            khronos_int8_t,
-            khronos_uint8_t,
-            khronos_int16_t,
-            khronos_uint16_t,
-            khronos_int32_t,
-            khronos_uint32_t,
-            khronos_int64_t,
-            khronos_uint64_t,
-
-            /// signed   same number of bits as a pointer
-            khronos_intptr_t,
-            /// unsigned same number of bits as a pointer
-            khronos_uintptr_t,
-            /// signed   size
-            khronos_ssize_t,
-            /// unsigned size
-            khronos_usize_t,
-            /// signed   32 bit floating point
-            khronos_float_t,
-        };
-
-        for (comptime std.enums.values(KhronosType)) |khronos_type| {
-            try c_scratch_writer.print("#define {s} ", .{@tagName(khronos_type)});
-            switch (khronos_type) {
-                inline //
-                .khronos_int8_t,
-                .khronos_uint8_t,
-                .khronos_int16_t,
-                .khronos_uint16_t,
-                .khronos_int32_t,
-                .khronos_uint32_t,
-                .khronos_int64_t,
-                .khronos_uint64_t,
-                .khronos_intptr_t,
-                .khronos_uintptr_t,
-                => |tag| try c_scratch_writer.writeAll(@tagName(tag)["khronos_".len..]),
-
-                .khronos_ssize_t => try c_scratch_writer.print("int{d}_t", .{target.cpu.arch.ptrBitWidth()}), // NOTE: Zig assumes pointer bits == size bits,
-                .khronos_usize_t => try c_scratch_writer.print("uint{d}_t", .{target.cpu.arch.ptrBitWidth()}), // and that's probably true for most targets that support OpenGL
-                .khronos_float_t => {
-                    assert(target.c_type_bit_size(.float) == 32); // TODO: Maybe add logic for this?
-                    try c_scratch_writer.writeAll("float");
-                },
-            }
-            try c_scratch_writer.writeAll("\n");
-        }
-        try c_scratch_writer.writeAll("\n");
-
-        for (registry.types) |type_entry| {
-            if (!required_types.containsAdapted(type_entry.name, RequiredTypeCtx.Adapted{ .inner = .{} })) continue;
-            if (type_entry.type_def.apientry_indices.len() != 0) {
-                log.err("Required type '{s}' contains API entry/entries - unhandled.\n", .{type_entry.name});
-                continue;
-            }
-
-            try c_scratch_writer.writeAll(type_entry.type_def.text);
-            try c_scratch_writer.writeAll("\n");
-        }
-
-        try c_scratch_buffered_writer.flush();
-
-        const translated_c: [:0]const u8 = blk: {
-            const exec_result = try std.ChildProcess.exec(.{
-                .allocator = allocator,
-                .argv = &[_][]const u8{ args.zig_exe_path, "translate-c", args.c_scratch_file_path },
-            });
-            defer allocator.free(exec_result.stderr);
-            errdefer allocator.free(exec_result.stdout);
-
-            var translated_c = try allocator.realloc(exec_result.stdout, exec_result.stdout.len + 1);
-            translated_c[translated_c.len - 1] = 0;
-            break :blk translated_c[0 .. translated_c.len - 1 :0];
-        };
-        defer allocator.free(translated_c);
-
-        var zig_ast = try std.zig.Ast.parse(allocator, translated_c, .zig);
-        defer zig_ast.deinit(allocator);
-
-        const tokens_tags: []const std.zig.Token.Tag = zig_ast.tokens.items(.tag);
-        for (zig_ast.rootDecls()) |root_decl_index| {
-            const decl_info = zig_ast.fullVarDecl(root_decl_index) orelse continue;
-            const first_tok_index = decl_info.firstToken();
-            assert(tokens_tags[first_tok_index] == .keyword_pub); // this is a translated C file, all the decls should be `pub`.
-            if (tokens_tags[first_tok_index + 1] != .keyword_const) continue;
-            if (tokens_tags[first_tok_index + 2] != .identifier) continue;
-            if (tokens_tags[first_tok_index + 3] != .equal) continue;
-
-            const ident: []const u8 = zig_ast.tokenSlice(first_tok_index + 2);
-            if (!required_types.containsAdapted(ident, RequiredTypeCtx.Adapted{ .inner = .{} })) continue;
-            const type_entry: Registry.TypeEntry = for (registry.types) |type_entry| {
-                if (std.mem.eql(u8, ident, type_entry.name)) break type_entry;
-            } else unreachable;
-
-            const def_node_index = decl_info.ast.init_node;
-            const def_node_first_tok = first_tok_index + 4;
-            const def_node_last_tok = zig_ast.lastToken(def_node_index);
-            assert(def_node_first_tok == zig_ast.firstToken(def_node_index));
-
-            if (type_entry.comment) |comment| {
-                var comment_line_iter = std.mem.split(u8, comment, &std.ascii.whitespace);
-                while (comment_line_iter.next()) |comment_line| {
-                    try out.print("/// {s}\n", .{comment_line});
-                }
-            }
-
-            try out.print("pub const {s} =", .{ident});
-            var i = def_node_first_tok;
-            while (i <= def_node_last_tok) : (i += 1) {
-                const tok_slice = zig_ast.tokenSlice(i);
-                try out.print(" {s}", .{tok_slice});
-            }
-            try out.writeAll(";\n");
-        }
-        try out.writeAll("\n");
-    }
 
     { // write enums
         var ungrouped_iter = all_enums.keyIterator();
