@@ -6,7 +6,6 @@ const gl_targets = @import("src/opengl-targets.zig");
 
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
-    _ = target;
     const optimize = b.standardOptimizeOption(.{});
     _ = optimize;
 
@@ -17,6 +16,7 @@ pub fn build(b: *Build) void {
     const generator_exe = b.addExecutable(.{
         .name = "generator-exe",
         .root_source_file = FileSource.relative("src/generate-gl.zig"),
+        .target = target,
     });
     generator_exe.install();
     generator_exe.linkLibC(); // TODO: stop using c allocator to avoid C dependency
@@ -44,6 +44,12 @@ pub fn build(b: *Build) void {
     // conveniently export a source file if the relevant arguments are provided.
     generate_bindings.addArg("--out");
     const bindings_src = generate_bindings.addOutputFileArg("gl.zig");
+
+    generate_bindings.addArg("--c-scratch");
+    _ = generate_bindings.addOutputFileArg("types.h");
+
+    generate_bindings.addArg("--zig-exe");
+    generate_bindings.addArg(b.zig_exe);
 
     // make sure to add extension arguments afterwards if any are provided
     if (b.option([]const []const u8, "extensions", "List of extension names to filter for")) |extensions| {
