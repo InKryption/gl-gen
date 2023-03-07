@@ -4,6 +4,7 @@ const xml = @import("xml.zig");
 const util = @import("util.zig");
 const gl_targets = @import("opengl-targets.zig");
 
+const GenerationArgs = @import("GenerationArgs.zig");
 const Registry = @import("Registry.zig");
 const assert = std.debug.assert;
 
@@ -356,6 +357,9 @@ pub fn main() !void {
     var lowercase_name_buf = std.ArrayList(u8).init(allocator);
     defer lowercase_name_buf.deinit();
 
+    // don't need GLvoid
+    _ = required_types.swapRemoveAdapted(@as([]const u8, "GLvoid"), RequiredTypeCtx.Adapted{ .inner = .{} });
+
     { // write types
         const target = builtin.target; // TODO: maybe make the target a build option through build.zig, separate from the native host?
 
@@ -556,167 +560,3 @@ pub fn main() !void {
 
     try out_writer_buffered.flush();
 }
-
-const GenerationArgs = struct {
-    output_file_path: []const u8,
-    gl_xml_file_path: []const u8,
-    c_scratch_file_path: []const u8,
-    zig_exe_path: []const u8,
-    api_version: gl_targets.Version,
-    api_profile: gl_targets.Profile,
-    extensions: []const []const u8,
-
-    fn deinit(args: GenerationArgs, allocator: std.mem.Allocator) void {
-        for (args.extensions) |ext| allocator.free(ext);
-        allocator.free(args.extensions);
-        allocator.free(args.zig_exe_path);
-        allocator.free(args.c_scratch_file_path);
-        allocator.free(args.gl_xml_file_path);
-        allocator.free(args.output_file_path);
-    }
-
-    fn parse(
-        allocator: std.mem.Allocator,
-        args_iter: *std.process.ArgIterator,
-        comptime log_scope: @TypeOf(.enum_literal),
-    ) !GenerationArgs {
-        const log = std.log.scoped(log_scope);
-
-        if (!args_iter.skip()) @panic("Tried to skip argv[0] (executable path), but argv is empty.\n");
-
-        var output_file_path: ?[]u8 = null;
-        errdefer allocator.free(output_file_path orelse "");
-
-        var gl_xml_file_path: ?[]u8 = null;
-        errdefer allocator.free(gl_xml_file_path orelse "");
-
-        var c_scratch_file_path: ?[]u8 = null;
-        errdefer allocator.free(c_scratch_file_path orelse "");
-
-        var zig_exe_path: ?[]u8 = null;
-        errdefer allocator.free(zig_exe_path orelse "");
-
-        var api_version: ?gl_targets.Version = null;
-        var api_profile: ?gl_targets.Profile = null;
-
-        const ArgName = enum {
-            out,
-            registry,
-            @"c-scratch",
-            @"zig-exe",
-            @"api-version",
-            @"api-profile",
-        };
-        var present = std.EnumSet(ArgName).initEmpty();
-
-        const whitespace_chars = [_]u8{ ' ', '\t', '\n', '\r' };
-        while (true) {
-            const arg_name: ArgName = blk: {
-                const arg_start = std.mem.trim(u8, args_iter.next() orelse break, &whitespace_chars);
-                if (std.mem.eql(u8, arg_start, "--")) break;
-
-                if (!std.mem.startsWith(u8, arg_start, "--")) {
-                    log.err("Expected argument name to be preceeded by '--'.\n", .{});
-                    continue;
-                }
-                const tag = std.meta.stringToEnum(ArgName, arg_start["--".len..]) orelse {
-                    log.warn("Unrecognised argument name '{s}'. Valid argument names are:\n{s}\n", .{
-                        arg_start["--".len..],
-                        util.fmtMultiLineList(std.meta.fieldNames(ArgName), .{
-                            .indent = &[_]u8{' '} ** 2,
-                            .element_prefix = "\"",
-                            .element_suffix = "\",",
-                        }),
-                    });
-                    return error.UnrecognisedArgumentName;
-                };
-
-                break :blk tag;
-            };
-            const arg_val: []const u8 = if (args_iter.next()) |arg_val| std.mem.trim(u8, arg_val, &whitespace_chars) else {
-                log.err("Expected argument key value pairs of the form '--<name> <value>'.\n", .{});
-                break;
-            };
-
-            if (present.contains(arg_name))
-                log.warn("Specified '{s}' more than once.\n", .{@tagName(arg_name)});
-            present.setPresent(arg_name, true);
-
-            switch (arg_name) {
-                .out => {
-                    output_file_path = try allocator.realloc(output_file_path orelse @as([]u8, ""), arg_val.len);
-                    std.mem.copy(u8, output_file_path.?, arg_val);
-                },
-                .registry => {
-                    gl_xml_file_path = try allocator.realloc(gl_xml_file_path orelse @as([]u8, ""), arg_val.len);
-                    std.mem.copy(u8, gl_xml_file_path.?, arg_val);
-                },
-                .@"zig-exe" => {
-                    zig_exe_path = try allocator.realloc(zig_exe_path orelse @as([]u8, ""), arg_val.len);
-                    std.mem.copy(u8, zig_exe_path.?, arg_val);
-                },
-                .@"c-scratch" => {
-                    c_scratch_file_path = try allocator.realloc(c_scratch_file_path orelse @as([]u8, ""), arg_val.len);
-                    std.mem.copy(u8, c_scratch_file_path.?, arg_val);
-                },
-                .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val) orelse {
-                    log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}\n", .{
-                        util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Version), .{
-                            .indent = &[_]u8{' '} ** 2,
-                            .element_prefix = "\"",
-                            .element_suffix = "\",",
-                        }),
-                    });
-
-                    return error.UnrecognisedApiVersion;
-                },
-                .@"api-profile" => api_profile = std.meta.stringToEnum(gl_targets.Profile, arg_val) orelse {
-                    log.err("Expected api-profile to be the target OpenGL API version. Should be one of:\n{s}\n", .{
-                        util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Profile), .{
-                            .indent = &[_]u8{' '} ** 2,
-                            .element_prefix = "\"",
-                            .element_suffix = "\",",
-                        }),
-                    });
-                    return error.UnrecognisedApiProfile;
-                },
-            }
-        }
-
-        { // check if any arguments are missing
-            const missing = present.complement();
-            var missing_iter = missing.iterator();
-            while (missing_iter.next()) |missing_tag|
-                log.err("Missing argument '{s}'.\n", .{@tagName(missing_tag)});
-            if (missing.count() != 0) return error.MissingArguments;
-        }
-
-        const extensions: []const []const u8 = blk: {
-            var extensions = std.ArrayList([]const u8).init(allocator);
-            defer extensions.deinit();
-            errdefer for (extensions.items) |ext_name| {
-                allocator.free(ext_name);
-            };
-
-            while (args_iter.next()) |ext_name| {
-                try extensions.append(try allocator.dupe(u8, std.mem.trim(u8, ext_name, &whitespace_chars)));
-            }
-
-            break :blk try extensions.toOwnedSlice();
-        };
-        errdefer {
-            for (extensions) |ext| allocator.free(ext);
-            allocator.free(extensions);
-        }
-
-        return GenerationArgs{
-            .output_file_path = output_file_path.?,
-            .gl_xml_file_path = gl_xml_file_path.?,
-            .c_scratch_file_path = c_scratch_file_path.?,
-            .zig_exe_path = zig_exe_path.?,
-            .api_version = api_version.?,
-            .api_profile = api_profile.?,
-            .extensions = extensions,
-        };
-    }
-};
