@@ -16,24 +16,31 @@ const ArgName = enum {
     registry,
     @"api-version",
     @"api-profile",
+
+    inline fn isFlag(arg_name: @This()) bool {
+        return switch (arg_name) {
+            .out,
+            .registry,
+            .@"api-version",
+            .@"api-profile",
+            => false,
+        };
+    }
 };
-comptime {
-    assert(@typeInfo(ArgName).Enum.fields.len == @typeInfo(GenerationArgs).Struct.fields.len - 1);
-}
 
-pub fn deinit(const_args: GenerationArgs, allocator: std.mem.Allocator) void {
-    var args = const_args;
-    for (args.extensions.keys()) |ext| allocator.free(ext);
-    args.extensions.deinit(allocator);
-    allocator.free(args.gl_xml_file_path);
-    allocator.free(args.output_file_path);
-}
-
+pub const ParseError = std.mem.Allocator.Error || error{
+    MissingDoubleDash,
+    UnrecognisedArgumentName,
+    NonFlagArgumentMissingValue,
+    UnrecognisedApiVersion,
+    UnrecognisedApiProfile,
+    MissingArguments,
+};
 pub fn parse(
     allocator: std.mem.Allocator,
     args_iter: anytype,
     comptime log_scope: @TypeOf(.enum_literal),
-) !GenerationArgs {
+) ParseError!GenerationArgs {
     const log = std.log.scoped(log_scope);
 
     if (!args_iter.skip()) @panic("Tried to skip argv[0] (executable path), but argv is empty.\n");
@@ -49,19 +56,21 @@ pub fn parse(
 
     var present = std.EnumSet(ArgName).initEmpty();
 
-    while (true) {
+    const found_extension_separator: bool = while (true) {
         const arg_name: ArgName = blk: {
-            const arg_start = std.mem.trim(u8, checkResult(args_iter.next()) orelse break, &std.ascii.whitespace);
-            if (std.mem.eql(u8, arg_start, "--")) break;
-
+            const arg_start_untrimmed = checkResult(args_iter.next()) orelse break false;
+            const arg_start = std.mem.trim(u8, arg_start_untrimmed, &std.ascii.whitespace);
             if (!std.mem.startsWith(u8, arg_start, "--")) {
-                log.err("Expected argument name to be preceeded by '--'.\n", .{});
-                continue;
+                log.err("Expected argument name to be preceeded by '--'.", .{});
+                return error.MissingDoubleDash;
             }
+
+            const arg_name_str: []const u8 = arg_start["--".len..];
+            if (arg_name_str.len == 0) break true;
             const tag = std.meta.stringToEnum(ArgName, arg_start["--".len..]) orelse {
-                log.warn("Unrecognised argument name '{s}'. Valid argument names are:\n{s}\n", .{
+                log.warn("Unrecognised argument name '{s}'. Valid argument names are:\n{s}", .{
                     arg_start["--".len..],
-                    util.fmtMultiLineList(std.meta.fieldNames(ArgName), .{
+                    util.fmtMultiLineList(comptime std.meta.fieldNames(ArgName), .{
                         .indent = &[_]u8{' '} ** 2,
                         .element_prefix = "\"",
                         .element_suffix = "\",",
@@ -72,27 +81,26 @@ pub fn parse(
 
             break :blk tag;
         };
-        const arg_val: []const u8 = if (checkResult(args_iter.next())) |arg_val| std.mem.trim(u8, arg_val, &std.ascii.whitespace) else {
-            log.err("Expected argument key value pairs of the form '--<name> <value>'.\n", .{});
-            break;
+        const arg_val: ?[]const u8 = blk: {
+            if (arg_name.isFlag()) break :blk null;
+            const arg_val_untrimmed = checkResult(args_iter.next()) orelse {
+                log.err("Expected argument key value pairs of the form '--{s} <value>'.", .{@tagName(arg_name)});
+                return error.NonFlagArgumentMissingValue;
+            };
+            break :blk std.mem.trim(u8, arg_val_untrimmed, &std.ascii.whitespace);
         };
 
-        if (present.contains(arg_name))
+        const duplicate_arg = present.contains(arg_name);
+        if (duplicate_arg)
             log.warn("Specified '{s}' more than once.\n", .{@tagName(arg_name)});
         present.setPresent(arg_name, true);
 
         switch (arg_name) {
-            .out => {
-                output_file_path = try allocator.realloc(output_file_path orelse @as([]u8, ""), arg_val.len);
-                std.mem.copy(u8, output_file_path.?, arg_val);
-            },
-            .registry => {
-                gl_xml_file_path = try allocator.realloc(gl_xml_file_path orelse @as([]u8, ""), arg_val.len);
-                std.mem.copy(u8, gl_xml_file_path.?, arg_val);
-            },
-            .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val) orelse {
-                log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}\n", .{
-                    util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Version), .{
+            .out => output_file_path = try reallocAndCopy(allocator, output_file_path orelse @as([]u8, ""), arg_val.?),
+            .registry => gl_xml_file_path = try reallocAndCopy(allocator, gl_xml_file_path orelse @as([]u8, ""), arg_val.?),
+            .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val.?) orelse {
+                log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}", .{
+                    util.fmtMultiLineList(comptime std.meta.fieldNames(gl_targets.Version), .{
                         .indent = &[_]u8{' '} ** 2,
                         .element_prefix = "\"",
                         .element_suffix = "\",",
@@ -100,9 +108,9 @@ pub fn parse(
                 });
                 return error.UnrecognisedApiVersion;
             },
-            .@"api-profile" => api_profile = std.meta.stringToEnum(gl_targets.Profile, arg_val) orelse {
-                log.err("Expected api-profile to be the target OpenGL API version. Should be one of:\n{s}\n", .{
-                    util.fmtMultiLineList(std.meta.fieldNames(gl_targets.Profile), .{
+            .@"api-profile" => api_profile = std.meta.stringToEnum(gl_targets.Profile, arg_val.?) orelse {
+                log.err("Expected api-profile to be the target OpenGL API version. Should be one of:\n{s}", .{
+                    util.fmtMultiLineList(comptime std.meta.fieldNames(gl_targets.Profile), .{
                         .indent = &[_]u8{' '} ** 2,
                         .element_prefix = "\"",
                         .element_suffix = "\",",
@@ -111,43 +119,20 @@ pub fn parse(
                 return error.UnrecognisedApiProfile;
             },
         }
-    }
+    };
 
-    { // check if any arguments are missing
-        const missing = present.complement();
-        var missing_iter = missing.iterator();
-        while (missing_iter.next()) |missing_tag|
-            log.err("Missing argument '{s}'.\n", .{@tagName(missing_tag)});
-        if (missing.count() != 0) return error.MissingArguments;
-    }
-
-    // const extensions: []const []const u8 = blk: {
-    //     var extensions = std.ArrayList([]const u8).init(allocator);
-    //     defer extensions.deinit();
-    //     errdefer for (extensions.items) |ext_name| {
-    //         allocator.free(ext_name);
-    //     };
-
-    //     while (checkResult(args_iter.next())) |ext_name| {
-    //         try extensions.append(try allocator.dupe(u8, std.mem.trim(u8, ext_name, &std.ascii.whitespace)));
-    //     }
-
-    //     break :blk try extensions.toOwnedSlice();
-    // };
-    // errdefer {
-    //     for (extensions) |ext| allocator.free(ext);
-    //     allocator.free(extensions);
-    // }
     var extensions = std.StringArrayHashMapUnmanaged(void){};
     errdefer extensions.deinit(allocator);
     errdefer for (extensions.keys()) |ext| allocator.free(ext);
 
-    while (checkResult(args_iter.next())) |ext_name| {
-        try extensions.put(allocator, ext_name, {});
-        const gop = try extensions.getOrPut(allocator, ext_name);
-        gop.value_ptr.* = {};
-        if (gop.found_existing) {
-            log.warn("Specified extensions '{s}' multiple times.", .{gop.key_ptr.*});
+    if (found_extension_separator) {
+        while (checkResult(args_iter.next())) |ext_name| {
+            try extensions.put(allocator, ext_name, {});
+            const gop = try extensions.getOrPut(allocator, ext_name);
+            gop.value_ptr.* = {};
+            if (gop.found_existing) {
+                log.warn("Specified extensions '{s}' multiple times.", .{gop.key_ptr.*});
+            }
         }
     }
 
@@ -158,6 +143,14 @@ pub fn parse(
         .api_profile = api_profile.?,
         .extensions = extensions,
     };
+}
+
+pub fn deinit(const_args: GenerationArgs, allocator: std.mem.Allocator) void {
+    var args = const_args;
+    for (args.extensions.keys()) |ext| allocator.free(ext);
+    args.extensions.deinit(allocator);
+    allocator.free(args.gl_xml_file_path);
+    allocator.free(args.output_file_path);
 }
 
 /// Simple helper function that checks the type of `result`.
@@ -180,4 +173,13 @@ inline fn checkResult(result: anytype) ?[]const u8 {
         },
         else => @compileError("Expected a pointer to bytes, but got `" ++ @typeName(T) ++ "` instead."),
     };
+}
+
+inline fn reallocAndCopy(allocator: std.mem.Allocator, alloc_dst: []u8, src: []const u8) std.mem.Allocator.Error![]u8 {
+    const result: []u8 = switch (std.math.order(alloc_dst.len, src.len)) {
+        .eq => alloc_dst,
+        .lt, .gt => try allocator.realloc(alloc_dst, src.len),
+    };
+    std.mem.copy(u8, result, src);
+    return result;
 }
