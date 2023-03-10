@@ -94,35 +94,32 @@ pub fn writeCodepointUtf8(writer: anytype, codepoint: u21) @TypeOf(writer).Error
 
 pub fn fmtMultiLineList(
     list: anytype,
-    args: anytype,
+    options: FmtMultiLineListOptions,
 ) FmtMultiLineList(std.meta.Elem(@TypeOf(list))) {
-    var formatter = FmtMultiLineList(std.meta.Elem(@TypeOf(list))){
+    return .{
         .list = list,
+        .options = options,
     };
-    inline for (@typeInfo(@TypeOf(args)).Struct.fields) |field| {
-        comptime assert(!std.mem.eql(u8, field.name, "list"));
-        @field(formatter, field.name) = @field(args, field.name);
-    }
-    return formatter;
 }
+pub const FmtMultiLineListOptions = struct {
+    indent_level: u32 = 0,
+    indent_first_elem: bool = true,
 
+    indent_prefix: []const u8 = "",
+    indent: []const u8 = " " ** 4,
+    indent_suffix: []const u8 = "",
+
+    element_prefix: []const u8 = "",
+    element_suffix: []const u8 = ",",
+
+    final_newline: bool = true,
+    newline: []const u8 = "\n",
+};
 pub fn FmtMultiLineList(comptime T: type) type {
     return struct {
         const Self = @This();
         list: []align(1) const T,
-
-        indent_level: u32 = 0,
-        indent_first_elem: bool = true,
-
-        indent_prefix: []const u8 = "",
-        indent: []const u8 = " " ** 4,
-        indent_suffix: []const u8 = "",
-
-        element_prefix: []const u8 = "",
-        element_suffix: []const u8 = ",",
-
-        final_newline: bool = true,
-        newline: []const u8 = "\n",
+        options: FmtMultiLineListOptions,
 
         pub fn format(
             self: Self,
@@ -130,15 +127,15 @@ pub fn FmtMultiLineList(comptime T: type) type {
             options: std.fmt.FormatOptions,
             writer: anytype,
         ) @TypeOf(writer).Error!void {
-            if (self.indent_first_elem) {
+            if (self.options.indent_first_elem) {
                 try self.writeIndent(writer);
             }
             for (self.list, 0..) |value, i| {
                 if (i != 0) {
-                    try writer.writeAll(self.newline);
+                    try writer.writeAll(self.options.newline);
                     try self.writeIndent(writer);
                 }
-                try writer.writeAll(self.element_prefix);
+                try writer.writeAll(self.options.element_prefix);
                 try std.fmt.formatType(
                     value,
                     fmt_str,
@@ -146,17 +143,17 @@ pub fn FmtMultiLineList(comptime T: type) type {
                     writer,
                     std.fmt.default_max_depth,
                 );
-                try writer.writeAll(self.element_suffix);
+                try writer.writeAll(self.options.element_suffix);
             }
-            if (self.final_newline) {
-                try writer.writeAll(self.newline);
+            if (self.options.final_newline) {
+                try writer.writeAll(self.options.newline);
             }
         }
 
         fn writeIndent(self: Self, writer: anytype) !void {
-            try writer.writeAll(self.indent_prefix);
-            for (0..self.indent_level) |_| try writer.writeAll(self.indent);
-            try writer.writeAll(self.indent_suffix);
+            try writer.writeAll(self.options.indent_prefix);
+            for (0..self.options.indent_level) |_| try writer.writeAll(self.options.indent);
+            try writer.writeAll(self.options.indent_suffix);
         }
     };
 }
@@ -195,6 +192,12 @@ pub inline fn lowerStringArrayList(
     return std.ascii.lowerString(output.items, ascii_string);
 }
 
+pub inline fn oneImplicitDeref(ptr_or_value: anytype) OneImplicitDeref(@TypeOf(ptr_or_value)) {
+    return switch (@typeInfo(@TypeOf(ptr_or_value))) {
+        .Pointer => ptr_or_value.*,
+        else => ptr_or_value,
+    };
+}
 pub fn OneImplicitDeref(comptime T: type) type {
     switch (@typeInfo(T)) {
         .Pointer => |pointer| switch (pointer.size) {

@@ -31,9 +31,10 @@ pub fn build(b: *Build) void {
         generate_bindings.addArg(xml_registry_path);
     }
 
-    if (b.option(gl_targets.Version, "version", "Version of OpenGL to target")) |version| {
+    // Should be something like `GL_VERSION_4_6`, `GL_VERSION_ES_CM_1_0`, `GL_ES_VERSION_2_0`, or `GL_SC_VERSION_2_0`
+    if (b.option([]const u8, "version", "Version of OpenGL to target")) |version| {
         generate_bindings.addArg("--api-version");
-        generate_bindings.addArg(@tagName(version));
+        generate_bindings.addArg(version);
     }
 
     if (b.option(gl_targets.Profile, "profile", "OpenGL profile to target")) |profile| {

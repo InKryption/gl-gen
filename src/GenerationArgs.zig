@@ -7,7 +7,7 @@ const assert = std.debug.assert;
 const GenerationArgs = @This();
 output_file_path: []const u8,
 gl_xml_file_path: []const u8,
-api_version: gl_targets.Version,
+api_version: []const u8,
 api_profile: gl_targets.Profile,
 extensions: std.StringArrayHashMapUnmanaged(void),
 
@@ -51,7 +51,9 @@ pub fn parse(
     var gl_xml_file_path: ?[]u8 = null;
     errdefer allocator.free(gl_xml_file_path orelse "");
 
-    var api_version: ?gl_targets.Version = null;
+    var api_version: ?[]u8 = null;
+    errdefer allocator.free(api_version orelse "");
+
     var api_profile: ?gl_targets.Profile = null;
 
     var present = std.EnumSet(ArgName).initEmpty();
@@ -98,16 +100,7 @@ pub fn parse(
         switch (arg_name) {
             .out => output_file_path = try reallocAndCopy(allocator, output_file_path orelse @as([]u8, ""), arg_val.?),
             .registry => gl_xml_file_path = try reallocAndCopy(allocator, gl_xml_file_path orelse @as([]u8, ""), arg_val.?),
-            .@"api-version" => api_version = std.meta.stringToEnum(gl_targets.Version, arg_val.?) orelse {
-                log.err("Expected api-version to be the target OpenGL API version. Should be one of:\n{s}", .{
-                    util.fmtMultiLineList(comptime std.meta.fieldNames(gl_targets.Version), .{
-                        .indent = &[_]u8{' '} ** 2,
-                        .element_prefix = "\"",
-                        .element_suffix = "\",",
-                    }),
-                });
-                return error.UnrecognisedApiVersion;
-            },
+            .@"api-version" => api_version = try reallocAndCopy(allocator, api_version orelse @as([]u8, ""), arg_val.?),
             .@"api-profile" => api_profile = std.meta.stringToEnum(gl_targets.Profile, arg_val.?) orelse {
                 log.err("Expected api-profile to be the target OpenGL API version. Should be one of:\n{s}", .{
                     util.fmtMultiLineList(comptime std.meta.fieldNames(gl_targets.Profile), .{
@@ -127,12 +120,14 @@ pub fn parse(
 
     if (found_extension_separator) {
         while (checkResult(args_iter.next())) |ext_name| {
-            try extensions.put(allocator, ext_name, {});
             const gop = try extensions.getOrPut(allocator, ext_name);
-            gop.value_ptr.* = {};
             if (gop.found_existing) {
                 log.warn("Specified extensions '{s}' multiple times.", .{gop.key_ptr.*});
+                continue;
             }
+            gop.value_ptr.* = {};
+            // this is fine, because the string contents are identical, so the hash should be identical
+            gop.key_ptr.* = try allocator.dupe(u8, ext_name);
         }
     }
 
@@ -149,6 +144,7 @@ pub fn deinit(const_args: GenerationArgs, allocator: std.mem.Allocator) void {
     var args = const_args;
     for (args.extensions.keys()) |ext| allocator.free(ext);
     args.extensions.deinit(allocator);
+    allocator.free(args.api_version);
     allocator.free(args.gl_xml_file_path);
     allocator.free(args.output_file_path);
 }

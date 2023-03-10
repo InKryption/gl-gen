@@ -11,11 +11,11 @@ const assert = std.debug.assert;
 pub fn main() !void {
     const log = std.log.default;
 
-    // var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 16 }){};
-    // defer _ = gpa.deinit();
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 16 }){};
+    defer _ = gpa.deinit();
 
-    // const allocator = gpa.allocator();
-    const allocator = std.heap.c_allocator;
+    const allocator = gpa.allocator();
+    // const allocator = std.heap.c_allocator;
 
     const args: GenerationArgs = args: {
         var args_iter = try std.process.argsWithAllocator(allocator);
@@ -24,7 +24,7 @@ pub fn main() !void {
     };
     defer args.deinit(allocator);
 
-    const target_api_version: gl_targets.Version = args.api_version;
+    const target_api_version: []const u8 = args.api_version;
     const target_api_profile: gl_targets.Profile = args.api_profile;
 
     const registry: Registry = reg: {
@@ -77,7 +77,7 @@ pub fn main() !void {
             \\//! * Profile: {s}
             \\//! * Extensions: 
         , .{
-            @tagName(target_api_version),
+            target_api_version,
             @tagName(target_api_profile),
         });
 
@@ -121,41 +121,55 @@ pub fn main() !void {
         );
     }
 
-    const FeatureSet = Registry.FeatureSetGroup.FeatureSet;
+    const FeatureSetGroup = Registry.FeatureSetGroup;
+    const target_feature_set_group = registry.features.getKeyAdapted(target_api_version, FeatureSetGroup.HashCtx.Adapted{}) orelse {
+        const ListFeatureNamesFmt = struct {
+            features: *const FeatureSetGroup.Set,
+            pub fn format(
+                self: @This(),
+                comptime fmt_str: []const u8,
+                options: std.fmt.FormatOptions,
+                writer: anytype,
+            ) @TypeOf(writer).Error!void {
+                _ = fmt_str;
+                _ = options;
+                for (self.features.keys()) |entry| {
+                    try writer.print("  '{s}'\n", .{entry.name});
+                }
+            }
+        };
+        log.err(
+            "Couldn't find feature set group with name '{s}' in registry. Available feature set groups are:\n{}",
+            .{ target_api_version, ListFeatureNamesFmt{ .features = &registry.features } },
+        );
+        return error.RegistryDoesntContainTargetFeatureSet;
+    };
 
-    const RequiredTypeCtx = util.AnyHashMapFieldContext(*const FeatureSet.Type, .name, std.array_hash_map.StringContext, u32, true);
-    const RequiredEnumCtx = util.AnyHashMapFieldContext(*const FeatureSet.Enum, .name, std.array_hash_map.StringContext, u32, true);
-    const RequiredCmdCtx = util.AnyHashMapFieldContext(*const FeatureSet.Command, .name, std.array_hash_map.StringContext, u32, true);
-
-    var required_types = RequiredTypeCtx.ArrayHashMap(void, true).init(allocator);
+    var required_types = std.StringArrayHashMap(void).init(allocator);
     defer required_types.deinit();
 
-    var required_enums = RequiredEnumCtx.ArrayHashMap(void, true).init(allocator);
+    var required_enums = std.StringArrayHashMap(void).init(allocator);
     defer required_enums.deinit();
 
-    var required_commands = RequiredCmdCtx.ArrayHashMap(void, true).init(allocator);
+    var required_commands = std.StringArrayHashMap(void).init(allocator);
     defer required_commands.deinit();
 
-    const target_feature_set_group: Registry.FeatureSetGroup = for (registry.features) |feature_set_group| {
-        if (feature_set_group.name == target_api_version) break feature_set_group;
-    } else return error.RegistryDoesntContainTargetFeatureSet;
-
     { // collect required stuff from target features and extension
-        var removed_types = RequiredTypeCtx.ArrayHashMap(void, true).init(allocator);
+        var removed_types = std.StringArrayHashMap(void).init(allocator);
         defer {
             for (removed_types.keys()) |@"type"|
                 _ = required_types.swapRemove(@"type");
             removed_types.deinit();
         }
 
-        var removed_enums = RequiredEnumCtx.ArrayHashMap(void, true).init(allocator);
+        var removed_enums = std.StringArrayHashMap(void).init(allocator);
         defer {
             for (removed_enums.keys()) |enumerant|
                 _ = required_enums.swapRemove(enumerant);
             removed_enums.deinit();
         }
 
-        var removed_commands = RequiredCmdCtx.ArrayHashMap(void, true).init(allocator);
+        var removed_commands = std.StringArrayHashMap(void).init(allocator);
         defer {
             for (removed_commands.keys()) |cmd|
                 _ = required_commands.swapRemove(cmd);
@@ -163,64 +177,54 @@ pub fn main() !void {
         }
 
         const OutSet = struct {
-            types: *RequiredTypeCtx.ArrayHashMap(void, true),
-            enums: *RequiredEnumCtx.ArrayHashMap(void, true),
-            commands: *RequiredCmdCtx.ArrayHashMap(void, true),
+            types: *std.StringArrayHashMap(void),
+            enums: *std.StringArrayHashMap(void),
+            commands: *std.StringArrayHashMap(void),
         };
-        for (registry.features) |feature_set_group| {
-            if (feature_set_group.api != target_feature_set_group.api) {
-                continue;
-            }
+        for (registry.features.keys()) |feature_set_group| {
+            if (feature_set_group.api != target_feature_set_group.api) continue;
             switch (feature_set_group.number.order(target_feature_set_group.number)) {
                 .gt => continue,
                 .lt, .eq => {},
             }
             _ = feature_set_group.protect; // TODO: Does this matter? Declaration order won't matter, but could it depend on something that isn't explicitly "required"?
 
-            for ([_][]const Registry.FeatureSetGroup.FeatureSet{
-                feature_set_group.require_sets,
-                feature_set_group.remove_sets,
-            }, [_]OutSet{
-                OutSet{ .types = &required_types, .enums = &required_enums, .commands = &required_commands },
-                OutSet{ .types = &removed_types, .enums = &removed_enums, .commands = &removed_commands },
-            }) |feature_sets, out_set| {
+            for (
+                [_][]const Registry.FeatureSetGroup.FeatureSet{
+                    feature_set_group.require_sets,
+                    feature_set_group.remove_sets,
+                },
+                [_]OutSet{
+                    OutSet{ .types = &required_types, .enums = &required_enums, .commands = &required_commands },
+                    OutSet{ .types = &removed_types, .enums = &removed_enums, .commands = &removed_commands },
+                },
+            ) |feature_sets, out_set| {
                 for (feature_sets) |set| {
                     if (set.profile != null and set.profile.? != target_api_profile) continue;
 
-                    try out_set.types.ensureUnusedCapacity(set.types.len);
-                    for (set.types) |*@"type"| {
-                        out_set.types.putAssumeCapacity(@"type", {});
+                    try out_set.types.ensureUnusedCapacity(set.types.count());
+                    for (set.types.keys()) |@"type"| {
+                        out_set.types.putAssumeCapacity(@"type".name, {});
                     }
 
-                    try out_set.enums.ensureUnusedCapacity(set.enums.len);
-                    for (set.enums) |*enumerant| {
-                        out_set.enums.putAssumeCapacity(enumerant, {});
+                    try out_set.enums.ensureUnusedCapacity(set.enums.count());
+                    for (set.enums.keys()) |enumerant| {
+                        out_set.enums.putAssumeCapacity(enumerant.name, {});
                     }
 
-                    try out_set.commands.ensureUnusedCapacity(set.commands.len);
-                    for (set.commands) |*command| {
-                        out_set.commands.putAssumeCapacity(command, {});
+                    try out_set.commands.ensureUnusedCapacity(set.commands.count());
+                    for (set.commands.keys()) |command| {
+                        out_set.commands.putAssumeCapacity(command.name, {});
                     }
                 }
             }
         }
 
-        const desired_ext_set: std.StringHashMapUnmanaged(void) = blk: {
-            var desired_ext_set = std.StringHashMapUnmanaged(void){};
-            errdefer desired_ext_set.deinit(allocator);
-
-            try desired_ext_set.ensureUnusedCapacity(allocator, std.math.lossyCast(u32, args.extensions.count()));
-            for (args.extensions.keys()) |ext_str| desired_ext_set.putAssumeCapacity(ext_str, {});
-
-            break :blk desired_ext_set;
-        };
-        defer {
-            var copy = desired_ext_set;
-            copy.deinit(allocator);
-        }
-
-        for (registry.extensions) |extension| {
-            if (!desired_ext_set.contains(extension.name)) continue;
+        for (args.extensions.keys()) |required_ext_name| {
+            const extension = registry.extensions.getKeyAdapted(required_ext_name, Registry.Extension.HashCtx.Adapted{}) orelse {
+                log.err("The registry is missing the required extension '{s}'.", .{required_ext_name});
+                return error.RegistryMissingRequiredExtension;
+            };
             _ = extension.protect; // TODO: Does this matter? Declaration order won't matter, but could it depend on something that isn't explicitly "required"?
 
             {
@@ -252,19 +256,19 @@ pub fn main() !void {
                     if (set.api != null and
                         set.api.? != target_feature_set_group.api) continue;
 
-                    try out_set.types.ensureUnusedCapacity(set.types.len);
-                    for (set.types) |*@"type"| {
-                        out_set.types.putAssumeCapacity(@"type", {});
+                    try out_set.types.ensureUnusedCapacity(set.types.count());
+                    for (set.types.keys()) |@"type"| {
+                        out_set.types.putAssumeCapacity(@"type".name, {});
                     }
 
-                    try out_set.enums.ensureUnusedCapacity(set.enums.len);
-                    for (set.enums) |*enumerant| {
-                        out_set.enums.putAssumeCapacity(enumerant, {});
+                    try out_set.enums.ensureUnusedCapacity(set.enums.count());
+                    for (set.enums.keys()) |enumerant| {
+                        out_set.enums.putAssumeCapacity(enumerant.name, {});
                     }
 
-                    try out_set.commands.ensureUnusedCapacity(set.commands.len);
-                    for (set.commands) |*command| {
-                        out_set.commands.putAssumeCapacity(command, {});
+                    try out_set.commands.ensureUnusedCapacity(set.commands.count());
+                    for (set.commands.keys()) |command| {
+                        out_set.commands.putAssumeCapacity(command.name, {});
                     }
                 }
             }
@@ -286,8 +290,8 @@ pub fn main() !void {
 
     // collect required enum values
     for (registry.enum_sets) |enum_set| {
-        for (enum_set.enumerants) |*enumerant| {
-            if (!required_enums.containsAdapted(enumerant.name, RequiredEnumCtx.Adapted{ .inner = .{} })) continue;
+        for (enum_set.enumerants.keys()) |*enumerant| {
+            if (!required_enums.contains(enumerant.name)) continue;
             try all_enums.putNoClobber(enumerant, {});
 
             var group_iter = std.mem.split(u8, enumerant.group orelse continue, ",");
@@ -310,7 +314,7 @@ pub fn main() !void {
     defer lowercase_name_buf.deinit();
 
     // don't need GLvoid
-    _ = required_types.swapRemoveAdapted(@as([]const u8, "GLvoid"), RequiredTypeCtx.Adapted{ .inner = .{} });
+    _ = required_types.swapRemove("GLvoid");
 
     { // write enums
         var ungrouped_iter = all_enums.keyIterator();
