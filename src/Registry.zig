@@ -145,7 +145,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
             };
             errdefer type_def.deinit(allocator);
 
-            const gop = try types.getOrPutAdapted(allocator, type_name, TypeEntry.HashCtx.Adapted{});
+            const gop = try types.getOrPutAdapted(allocator, type_name, TypeEntry.HashCtx.Adapted{ .inner = .{} });
             if (gop.found_existing) return error.TypeEntryNameCollision;
             gop.key_ptr.* = TypeEntry{
                 .requires = requires,
@@ -287,7 +287,7 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
                             };
                         };
 
-                        const gop = try values_list.getOrPutAdapted(allocator, value_name, EnumsSet.Enumerant.HashCtx.Adapted{});
+                        const gop = try values_list.getOrPutAdapted(allocator, value_name, EnumsSet.Enumerant.adaptedHashCtx());
                         if (gop.found_existing) return error.EnumerantNameCollision;
                         gop.key_ptr.* = EnumsSet.Enumerant{
                             .name = value_name,
@@ -374,9 +374,9 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
         };
         errdefer allocator.free(namespace);
 
-        var entries_list = std.ArrayList(Commands.Entry).init(allocator);
-        defer entries_list.deinit();
-        errdefer for (entries_list.items) |entry| entry.deinit(allocator);
+        var entries_list = Commands.Entry.Set{};
+        errdefer entries_list.deinit(allocator);
+        errdefer for (entries_list.keys()) |entry| entry.deinit(allocator);
 
         for (commands_elem.children) |commands_child| {
             const command_elem: xml.Element = switch (commands_child) {
@@ -673,19 +673,19 @@ pub fn parse(tree: xml.Element, allocator: std.mem.Allocator) !Registry {
             errdefer allocator.free(glx);
             errdefer for (glx) |info| info.deinit(allocator);
 
-            try entries_list.append(Commands.Entry{
+            const gop = try entries_list.getOrPutAdapted(allocator, proto.name(), Commands.Entry.adaptedHashCtx());
+            gop.key_ptr.* = Commands.Entry{
                 .comment = command_comment,
                 .proto = proto,
                 .params = params,
                 .alias = alias,
                 .vecequiv = vecequiv,
                 .glx = glx,
-            });
+            };
+            gop.value_ptr.* = void{};
         }
 
-        const entries: []const Commands.Entry = try entries_list.toOwnedSlice();
-        errdefer allocator.free(entries);
-        errdefer for (entries) |entry| entry.deinit(allocator);
+        const entries: Commands.Entry.Set = entries_list;
 
         break :cmds Commands{
             .namespace = namespace,
@@ -999,7 +999,7 @@ inline fn collectFeatures(
 
         switch (feature_tag) {
             .command => {
-                const gop = try feature_set_commands_list.getOrPutAdapted(allocator, feature_name, FeatureSetGroup.Command.HashCtx.Adapted{});
+                const gop = try feature_set_commands_list.getOrPutAdapted(allocator, feature_name, FeatureSetGroup.Command.adaptedHashCtx());
                 if (!gop.found_existing) {
                     const duped_name = try allocator.dupe(u8, feature_name);
                     errdefer allocator.free(duped_name);
@@ -1015,7 +1015,7 @@ inline fn collectFeatures(
                 gop.value_ptr.* = void{};
             },
             .@"enum" => {
-                const gop = try feature_set_enums_list.getOrPutAdapted(allocator, feature_name, FeatureSetGroup.Enum.HashCtx.Adapted{});
+                const gop = try feature_set_enums_list.getOrPutAdapted(allocator, feature_name, FeatureSetGroup.Enum.adaptedHashCtx());
                 if (!gop.found_existing) {
                     const duped_name = try allocator.dupe(u8, feature_name);
                     errdefer allocator.free(duped_name);
@@ -1031,7 +1031,7 @@ inline fn collectFeatures(
                 gop.value_ptr.* = void{};
             },
             .type => {
-                const gop = try feature_set_types_list.getOrPutAdapted(allocator, feature_name, FeatureSetGroup.Type.HashCtx.Adapted{});
+                const gop = try feature_set_types_list.getOrPutAdapted(allocator, feature_name, FeatureSetGroup.Type.adaptedHashCtx());
                 if (!gop.found_existing) {
                     const duped_name = try allocator.dupe(u8, feature_name);
                     errdefer allocator.free(duped_name);
@@ -1118,28 +1118,10 @@ pub const TypeEntry = struct {
     };
 
     pub const Set = std.ArrayHashMapUnmanaged(TypeEntry, void, HashCtx, true);
-    pub const HashCtx = struct {
-        pub fn hash(ctx: HashCtx, key: TypeEntry) u32 {
-            _ = ctx;
-            return Adapted.hash(.{}, key.name);
-        }
-        pub fn eql(ctx: HashCtx, a: TypeEntry, b: TypeEntry, b_index: usize) bool {
-            _ = ctx;
-            return Adapted.eql(.{}, a.name, b, b_index);
-        }
-
-        pub const Adapted = struct {
-            pub fn hash(ctx: Adapted, key_name: []const u8) u32 {
-                _ = ctx;
-                return std.array_hash_map.hashString(key_name);
-            }
-            pub fn eql(ctx: Adapted, a_name: []const u8, b: TypeEntry, b_index: usize) bool {
-                _ = ctx;
-                _ = b_index;
-                return std.array_hash_map.eqlString(a_name, b.name);
-            }
-        };
-    };
+    pub const HashCtx = util.ArrayHashMapFieldCtx(TypeEntry, .name, std.array_hash_map.StringContext);
+    pub inline fn adaptedHashCtx() HashCtx.Adapted {
+        return .{ .inner = .{} };
+    }
 };
 
 pub const EnumsSet = struct {
@@ -1196,27 +1178,10 @@ pub const EnumsSet = struct {
         };
 
         pub const Set = std.ArrayHashMapUnmanaged(Enumerant, void, HashCtx, true);
-        pub const HashCtx = struct {
-            pub fn hash(ctx: HashCtx, key: Enumerant) u32 {
-                _ = ctx;
-                return Adapted.hash(.{}, key.name);
-            }
-            pub fn eql(ctx: HashCtx, a: Enumerant, b: Enumerant, b_index: usize) bool {
-                _ = ctx;
-                return Adapted.eql(.{}, a.name, b, b_index);
-            }
-            pub const Adapted = struct {
-                pub fn hash(ctx: Adapted, key_name: []const u8) u32 {
-                    _ = ctx;
-                    return std.array_hash_map.hashString(key_name);
-                }
-                pub fn eql(ctx: Adapted, a_name: []const u8, b: Enumerant, b_index: usize) bool {
-                    _ = ctx;
-                    _ = b_index;
-                    return std.array_hash_map.eqlString(a_name, b.name);
-                }
-            };
-        };
+        pub const HashCtx = util.ArrayHashMapFieldCtx(Enumerant, .name, std.array_hash_map.StringContext);
+        pub inline fn adaptedHashCtx() HashCtx.Adapted {
+            return .{ .inner = .{} };
+        }
     };
     pub const UnusedRange = struct {
         range: ValueRange,
@@ -1244,13 +1209,15 @@ pub const EnumsSet = struct {
 pub const Commands = struct {
     namespace: []const u8,
     /// list of the contained `<command>` element tags.
-    entries: []const Entry,
+    entries: Entry.Set,
 
-    pub fn deinit(self: Commands, allocator: std.mem.Allocator) void {
+    pub fn deinit(const_self: Commands, allocator: std.mem.Allocator) void {
+        var self = const_self;
+
         allocator.free(self.namespace);
 
-        for (self.entries) |entry| entry.deinit(allocator);
-        allocator.free(self.entries);
+        for (self.entries.keys()) |entry| entry.deinit(allocator);
+        self.entries.deinit(allocator);
     }
 
     pub const Entry = struct {
@@ -1291,6 +1258,12 @@ pub const Commands = struct {
 
                 for (self.def) |component| component.deinit(allocator);
                 allocator.free(self.def);
+            }
+
+            pub fn name(self: Proto) []const u8 {
+                const component = self.def[self.name_index];
+                assert(!component.is_ptype); // name cannot be type
+                return component.text;
             }
 
             pub const Component = struct {
@@ -1346,6 +1319,32 @@ pub const Commands = struct {
                 allocator.free(self.comment orelse "");
             }
         };
+
+        pub const Set = std.ArrayHashMapUnmanaged(Entry, void, HashCtx, true);
+        pub const HashCtx = struct {
+            pub fn hash(ctx: HashCtx, key: Entry) u32 {
+                _ = ctx;
+                return Adapted.hash(.{}, key.proto.name());
+            }
+            pub fn eql(ctx: HashCtx, a: Entry, b: Entry, b_index: usize) bool {
+                _ = ctx;
+                return Adapted.eql(.{}, a.proto.name(), b, b_index);
+            }
+            pub const Adapted = struct {
+                pub fn hash(ctx: Adapted, key_name: []const u8) u32 {
+                    _ = ctx;
+                    return std.array_hash_map.hashString(key_name);
+                }
+                pub fn eql(ctx: Adapted, a_name: []const u8, b: Entry, b_index: usize) bool {
+                    _ = ctx;
+                    _ = b_index;
+                    return std.array_hash_map.eqlString(a_name, b.proto.name());
+                }
+            };
+        };
+        pub inline fn adaptedHashCtx() HashCtx.Adapted {
+            return .{};
+        }
     };
 };
 
@@ -1446,7 +1445,10 @@ pub const FeatureSetGroup = struct {
         }
 
         pub const Set = std.ArrayHashMapUnmanaged(Command, void, Command.HashCtx, true);
-        pub const HashCtx = GenericFeatureHashCtx(Command);
+        pub const HashCtx = util.ArrayHashMapFieldCtx(Command, .name, std.array_hash_map.StringContext);
+        pub inline fn adaptedHashCtx() Command.HashCtx.Adapted {
+            return .{ .inner = .{} };
+        }
     };
     pub const Enum = struct {
         name: []const u8,
@@ -1458,7 +1460,10 @@ pub const FeatureSetGroup = struct {
         }
 
         pub const Set = std.ArrayHashMapUnmanaged(Enum, void, Enum.HashCtx, true);
-        pub const HashCtx = GenericFeatureHashCtx(Enum);
+        pub const HashCtx = util.ArrayHashMapFieldCtx(Enum, .name, std.array_hash_map.StringContext);
+        pub inline fn adaptedHashCtx() Enum.HashCtx.Adapted {
+            return .{ .inner = .{} };
+        }
     };
     pub const Type = struct {
         name: []const u8,
@@ -1470,36 +1475,11 @@ pub const FeatureSetGroup = struct {
         }
 
         pub const Set = std.ArrayHashMapUnmanaged(Type, void, Type.HashCtx, true);
-        pub const HashCtx = GenericFeatureHashCtx(Type);
-    };
-    fn GenericFeatureHashCtx(comptime T: type) type {
-        switch (T) {
-            Command, Enum, Type => {},
-            else => unreachable,
+        pub const HashCtx = util.ArrayHashMapFieldCtx(Type, .name, std.array_hash_map.StringContext);
+        pub inline fn adaptedHashCtx() Type.HashCtx.Adapted {
+            return .{ .inner = .{} };
         }
-        return struct {
-            const Self = @This();
-            pub fn hash(ctx: Self, key: T) u32 {
-                _ = ctx;
-                return Adapted.hash(.{}, key.name);
-            }
-            pub fn eql(ctx: Self, a: T, b: T, b_index: usize) bool {
-                _ = ctx;
-                return Adapted.eql(.{}, a.name, b, b_index);
-            }
-            pub const Adapted = struct {
-                pub fn hash(ctx: Adapted, key_name: []const u8) u32 {
-                    _ = ctx;
-                    return std.array_hash_map.hashString(key_name);
-                }
-                pub fn eql(ctx: Adapted, a_name: []const u8, b: T, b_index: usize) bool {
-                    _ = ctx;
-                    _ = b_index;
-                    return std.array_hash_map.eqlString(a_name, b.name);
-                }
-            };
-        };
-    }
+    };
 
     pub const Set = std.ArrayHashMapUnmanaged(FeatureSetGroup, void, HashCtx, true);
     pub const HashCtx = struct {

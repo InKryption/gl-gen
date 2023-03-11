@@ -209,20 +209,34 @@ pub fn OneImplicitDeref(comptime T: type) type {
     return T;
 }
 
-pub fn AnyHashMapFieldContext(
+pub fn HashMapFieldCtx(
     comptime S: type,
     comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
-    comptime InnerContext: type,
+    comptime InnerCtx: type,
+) type {
+    return AnyHashMapFieldCtx(S, field_id, InnerCtx, u64, false);
+}
+pub fn ArrayHashMapFieldCtx(
+    comptime S: type,
+    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
+    comptime InnerCtx: type,
+) type {
+    return AnyHashMapFieldCtx(S, field_id, InnerCtx, u32, true);
+}
+pub fn AnyHashMapFieldCtx(
+    comptime S: type,
+    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
+    comptime InnerCtx: type,
     comptime Hash: type,
     comptime is_array: bool,
 ) type {
     return struct {
         const Self = @This();
-        inner: InnerContext,
+        inner: InnerCtx,
 
-        pub const Adapted = AnyHashMapFieldContextAdapted(S, field_id, InnerContext, Hash, is_array);
         comptime {
-            _ = Adapted;
+            const Field = std.meta.FieldType(OneImplicitDeref(S), field_id);
+            std.hash_map.verifyContext(InnerCtx, Field, Field, Hash, is_array);
         }
 
         pub fn hash(self: Self, key: S) Hash {
@@ -241,48 +255,24 @@ pub fn AnyHashMapFieldContext(
             }
         }).eql;
 
-        pub fn HashMap(comptime V: type, comptime max_load_percentage: u64) type {
-            assert(!is_array);
-            assert(Hash == u64);
-            return std.HashMap(S, V, Self, max_load_percentage);
-        }
-        pub fn ArrayHashMap(comptime V: type, comptime store_hash: bool) type {
-            assert(is_array);
-            assert(Hash == u32);
-            return std.ArrayHashMap(S, V, Self, store_hash);
-        }
-    };
-}
+        pub const Adapted = struct {
+            inner: InnerCtx,
 
-fn AnyHashMapFieldContextAdapted(
-    comptime S: type,
-    comptime field_id: std.meta.FieldEnum(OneImplicitDeref(S)),
-    comptime InnerContext: type,
-    comptime Hash: type,
-    comptime is_array: bool,
-) type {
-    return struct {
-        const Self = @This();
-        inner: InnerContext,
-
-        const Field = std.meta.FieldType(OneImplicitDeref(S), field_id);
-        comptime {
-            std.hash_map.verifyContext(InnerContext, Field, Field, Hash, is_array);
-        }
-
-        pub fn hash(self: Self, key_field: Field) Hash {
-            return self.inner.hash(key_field);
-        }
-        pub const eql = (if (is_array) struct {
-            fn eql(self: Self, a_field: Field, b: S, b_index: usize) bool {
-                const b_field = @field(b, @tagName(field_id));
-                return self.inner.eql(a_field, b_field, b_index);
+            const Field = std.meta.FieldType(OneImplicitDeref(S), field_id);
+            pub fn hash(self: Adapted, key_field: Field) Hash {
+                return self.inner.hash(key_field);
             }
-        } else struct {
-            fn eql(self: Self, a_field: Field, b: S) bool {
-                const b_field = @field(b, @tagName(field_id));
-                return self.inner.eql(a_field, b_field);
-            }
-        }).eql;
+            pub const eql = if (is_array) struct {
+                fn eql(self: Adapted, a_field: Field, b: S, b_index: usize) bool {
+                    const b_field = @field(b, @tagName(field_id));
+                    return self.inner.eql(a_field, b_field, b_index);
+                }
+            }.eql else struct {
+                fn eql(self: Adapted, a_field: Field, b: S) bool {
+                    const b_field = @field(b, @tagName(field_id));
+                    return self.inner.eql(a_field, b_field);
+                }
+            }.eql;
+        };
     };
 }

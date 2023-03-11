@@ -275,8 +275,29 @@ pub fn main() !void {
         }
     }
 
-    const EnumerantContext = util.AnyHashMapFieldContext(*const Registry.EnumsSet.Enumerant, .name, std.hash_map.StringContext, u64, false);
-    const EnumerantSet = EnumerantContext.HashMap(void, std.hash_map.default_max_load_percentage);
+    const EnumerantCtx = struct {
+        const KeyValue = Registry.EnumsSet.Enumerant;
+        pub fn hash(ctx: @This(), key: *const KeyValue) u32 {
+            _ = ctx;
+            return Adapted.hash(.{}, key.name);
+        }
+        pub fn eql(ctx: @This(), a: *const KeyValue, b: *const KeyValue, b_index: usize) bool {
+            _ = ctx;
+            return Adapted.eql(.{}, a.name, b, b_index);
+        }
+
+        const Adapted = struct {
+            pub fn hash(ctx: Adapted, key_name: []const u8) u32 {
+                _ = ctx;
+                return KeyValue.adaptedHashCtx().hash(key_name);
+            }
+            pub fn eql(ctx: Adapted, a_name: []const u8, b: *const KeyValue, b_index: usize) bool {
+                _ = ctx;
+                return KeyValue.adaptedHashCtx().eql(a_name, b.*, b_index);
+            }
+        };
+    };
+    const EnumerantSet = std.ArrayHashMap(*const Registry.EnumsSet.Enumerant, void, EnumerantCtx, true);
 
     var all_enums = EnumerantSet.init(allocator);
     defer all_enums.deinit();
@@ -301,7 +322,7 @@ pub fn main() !void {
                     gop_group.value_ptr.* = .{};
                 }
 
-                const gop_enumerant = try gop_group.value_ptr.getOrPutAdapted(allocator, enumerant.name, EnumerantContext.Adapted{ .inner = .{} });
+                const gop_enumerant = try gop_group.value_ptr.getOrPutAdapted(allocator, enumerant.name, EnumerantCtx.Adapted{});
                 // there should be no two distinct enumerants that have the same 'name'.
                 // If there is, the registry is probably messed up.
                 assert(!gop_enumerant.found_existing);
@@ -317,10 +338,7 @@ pub fn main() !void {
     _ = required_types.swapRemove("GLvoid");
 
     { // write enums
-        var ungrouped_iter = all_enums.keyIterator();
-        while (ungrouped_iter.next()) |val_ptr| {
-            const enumerant: Registry.EnumsSet.Enumerant = val_ptr.*.*;
-
+        for (all_enums.keys()) |enumerant| {
             assert(std.mem.startsWith(u8, enumerant.name, "GL_"));
             const zig_name = try util.lowerStringArrayList(&lowercase_name_buf, enumerant.name["GL_".len..]);
 
@@ -332,10 +350,7 @@ pub fn main() !void {
             const group_name = entry.key_ptr.*;
 
             try out.print("pub const {s} = enum(u32) {{\n", .{group_name});
-            var val_iter = entry.value_ptr.keyIterator();
-            while (val_iter.next()) |val_ptr| {
-                const enumerant: Registry.EnumsSet.Enumerant = val_ptr.*.*;
-
+            for (entry.value_ptr.keys()) |enumerant| {
                 assert(std.mem.startsWith(u8, enumerant.name, "GL_"));
                 const zig_name = try util.lowerStringArrayList(&lowercase_name_buf, enumerant.name["GL_".len..]);
 
