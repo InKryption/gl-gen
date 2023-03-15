@@ -28,11 +28,10 @@ const ArgName = enum {
     }
 };
 
-pub const ParseError = std.mem.Allocator.Error || error{
+pub const ParseError = error{
     MissingDoubleDash,
     UnrecognisedArgumentName,
     NonFlagArgumentMissingValue,
-    UnrecognisedApiVersion,
     UnrecognisedApiProfile,
     MissingArguments,
 };
@@ -40,7 +39,7 @@ pub fn parse(
     allocator: std.mem.Allocator,
     args_iter: anytype,
     comptime log_scope: @TypeOf(.enum_literal),
-) ParseError!GenerationArgs {
+) (ParseError || std.mem.Allocator.Error)!GenerationArgs {
     const log = std.log.scoped(log_scope);
 
     if (!args_iter.skip()) @panic("Tried to skip argv[0] (executable path), but argv is empty.\n");
@@ -114,6 +113,19 @@ pub fn parse(
         }
     };
 
+    if (!present.eql(std.EnumSet(ArgName).initFull())) {
+        var missing_list = std.BoundedArray([]const u8, @typeInfo(ArgName).Enum.fields.len){};
+
+        var missing_iter = present.complement().iterator();
+        while (missing_iter.next()) |missing|
+            missing_list.appendAssumeCapacity(switch (missing) {
+                inline else => |tag| "--" ++ @tagName(tag),
+            });
+        log.err("Missing arguments:\n{s}", .{util.fmtMultiLineList(missing_list.constSlice(), .{ .indent_level = 1, .element_suffix = "" })});
+
+        return error.MissingArguments;
+    }
+
     var extensions = std.StringArrayHashMapUnmanaged(void){};
     errdefer extensions.deinit(allocator);
     errdefer for (extensions.keys()) |ext| allocator.free(ext);
@@ -122,7 +134,7 @@ pub fn parse(
         while (checkResult(args_iter.next())) |ext_name| {
             const gop = try extensions.getOrPut(allocator, ext_name);
             if (gop.found_existing) {
-                log.warn("Specified extensions '{s}' multiple times.", .{gop.key_ptr.*});
+                log.warn("Specified extension '{s}' multiple times.", .{gop.key_ptr.*});
                 continue;
             }
             gop.value_ptr.* = {};
